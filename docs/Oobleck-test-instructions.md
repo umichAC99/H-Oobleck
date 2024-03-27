@@ -27,3 +27,11 @@ Remove `-s` if you don't want to see the output
 ```
 pytest tests/planning/test_pipeline_template.py -s
 ```
+
+### Debug Help:
+If anyone faces a CMake.txt file missing error from the cppcoro folder, then there is likely a submodule dependency which causes it. Run these below lines in your local git repo to fix that:
+Remove `-s` if you don't want to see the output
+```
+git submodule init
+git submodule update
+```
