@@ -3,7 +3,6 @@ from __future__ import annotations
 import itertools
 from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import Optional
 
 import torch.distributed as dist
 from loguru import logger
