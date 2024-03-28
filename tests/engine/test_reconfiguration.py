@@ -12,13 +12,6 @@ import torch.distributed as dist
 from colossalai.accelerator import get_accelerator
 from colossalai.checkpoint_io.utils import save_state_dict_shards
 from colossalai.interface import ModelWrapper, OptimizerWrapper
-from conftest import (
-    config,
-    template_1stage,
-    template_2stages,
-    template_3stages,
-)
-from data_builder import GLUEDataBuilder
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 from torch.optim import Adam
 from torch.testing._internal.common_distributed import (
@@ -42,7 +35,10 @@ from oobleck.elastic.run import HostInfo
 from oobleck.engine.configuration_engine import ConfigurationEngine
 from oobleck.engine.plugin import OobleckPlugin
 
-tag: str = "test-gpt2"
+from ..conftest import config, tag
+from .conftest import template_1stage, template_2stages, template_3stages
+from .data_builder import GLUEDataBuilder
+
 microbatch_size: int = 1
 global_batch_size: int = 12
 

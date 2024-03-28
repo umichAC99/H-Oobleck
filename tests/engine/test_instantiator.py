@@ -1,7 +1,8 @@
 import pytest
-from conftest import template_1stage, template_2stages, template_3stages
 
 from oobleck.engine.pipeline_instantiator import PipelineInstantiator
+
+from .conftest import template_1stage, template_2stages, template_3stages
 
 
 @pytest.mark.parametrize(

@@ -10,12 +10,6 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
     HybridParallelAMPOptimizer,
     HybridParallelNaiveOptimizer,
 )
-from conftest import (
-    GLUEDataBuilder,
-    init_profile_data,
-    template_2stages,
-    template_3stages,
-)
 from oobleck_colossalai import (
     HeterogeneousDataLoader,
     HeterogeneousParallelModule,
@@ -29,7 +23,6 @@ from torch.testing._internal.common_utils import (
     parametrize,
 )
 from transformers import (
-    AutoConfig,
     GPT2ForSequenceClassification,
     get_linear_schedule_with_warmup,
 )
@@ -39,8 +32,12 @@ from oobleck.engine.configuration_engine import ConfigurationEngine
 from oobleck.engine.execution_engine import ExecutionEngine
 from oobleck.engine.plugin import OobleckPlugin
 
-config = AutoConfig.from_pretrained("gpt2")
-config.num_hidden_layers = 4
+from ..conftest import init_profile_data
+from .conftest import (
+    template_2stages,
+    template_3stages,
+)
+from .data_builder import GLUEDataBuilder
 
 
 class TestExecutionEngineClass(MultiProcessTestCase):

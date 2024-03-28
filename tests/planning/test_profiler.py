@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from transformers import AutoConfig, AutoModelForPreTraining, PreTrainedModel
 
-from oobleck.profiler import ModelProfiler
+from oobleck.planning.profiler import ModelProfiler
 
 
 @pytest.fixture
