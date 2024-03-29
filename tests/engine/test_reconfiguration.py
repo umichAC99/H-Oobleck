@@ -126,24 +126,19 @@ class OobleckReconfigurationClassBase(MultiProcessTestCase):
 
         templates = [template_1stage, template_2stages]
 
-        with patch.object(
-            OobleckPlugin,
-            "_instantiate_pipelines",
-            return_value=(
-                pipelines,
-                {
-                    template: global_batch_size // len(templates)
-                    for template in templates
-                },
-            ),
-        ):
-            plugin = OobleckPlugin(
-                pipeline_templates=templates,
-                tp_size=self.tp_size,
-                global_batch_size=global_batch_size,
-                microbatch_size=microbatch_size,
-                precision="bf16",
-            )
+        plugin = OobleckPlugin(
+            tp_size=self.tp_size,
+            global_batch_size=global_batch_size,
+            microbatch_size=microbatch_size,
+            precision="bf16",
+        )
+
+        plugin.set_pipelines(
+            pipelines=pipelines,
+            num_microbatches={
+                template: global_batch_size // len(templates) for template in templates
+            },
+        )
 
         dataloader = GLUEDataBuilder("gpt2", plugin).train_dataloader()
         model = GPT2ForSequenceClassification(config)

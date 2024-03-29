@@ -421,7 +421,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
                 module = layer_modules[layers[index]]
                 ModelSharder.set_tensors_to_placeholder(module)
 
-        self.__post_init__(new_pipelines, self.tp_size, new_num_microbatches)
+        self.set_pipelines(new_pipelines, new_num_microbatches)
         model, optimizer, _, dataloader, lr_scheduler = self.configure(
             model, optimizer, None, dataloader, lr_scheduler, forced=True
         )
