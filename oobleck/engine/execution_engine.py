@@ -41,12 +41,9 @@ class ExecutionEngine:
 
         self.plugin = plugin
 
-        configuration_engine = ConfigurationEngine.get_instance()
-        self.tag = configuration_engine.tag
-        self.base_dir = configuration_engine.base_dir
-        self.booster = Booster(plugin=plugin, **booster_kwargs)
-
-        self.pipeline_templates: dict[int, PipelineTemplate] | None = None
+        self.pipeline_templates: list[PipelineTemplate] | None = None
+        self.booster: Booster | None = None
+        self.booster_kwargs = booster_kwargs
 
     @property
     def is_master(self) -> bool:
@@ -63,59 +60,60 @@ class ExecutionEngine:
         dataloader: DataLoader | None = None,
         lr_scheduler: LRScheduler | None = None,
     ) -> tuple[nn.Module, Optimizer, Callable, DataLoader, LRScheduler]:
-        """Initialize pipeline templates and distributed configuration."""
+        """Initialize pipeline templates and distributed configuration.
+
+        This function automatically initializes torch.distributed,
+        create pipeline templates, instantiate pipelines, and then boost the model.
+        """
+
+        if self.pipeline_templates is not None:
+            raise RuntimeError(
+                "Pipeline templates are already initialized. "
+                "You should not call prepare() more than once."
+            )
 
         configuration_engine = ConfigurationEngine.get_instance()
-
-        if self.pipeline_templates is None:
-            logger.debug("Creating pipeline templates...")
-            profiler = ModelProfiler(
-                self.tag,
-                model.__class__.__name__,
-                model.config,
-                self.plugin.microbatch_size,
-                self.base_dir,
-            )
-
-            # Check profile data exists
-            if not profiler.profile_exists():
-                logger.debug("Profile does not exist. Start profiling.")
-                profile_dataloder = DataLoader(
-                    dataloader.dataset, batch_size=self.plugin.microbatch_size
-                )
-                inputs = next(iter(profile_dataloder))
-                profiler.profile(
-                    configuration_engine.local_rank,
-                    self.plugin.shard_config["tp_size"],
-                    inputs,
-                )
-
-            # Calculate the minimum number of nodes required
-            memory = torch.cuda.get_device_properties(0).total_memory
-            min_num_nodes = max(
-                1,
-                math.ceil(profiler.mem_consumption / memory),
-            )
-            max_num_nodes = (
-                configuration_engine.world_size // self.plugin.shard_config["tp_size"]
-            )
-
-            self.pipeline_templates = create_pipeline_templates(
-                _fullname(model),
-                self.plugin.microbatch_size,
-                list(range(min_num_nodes, max_num_nodes)) + [max_num_nodes],
-                self.base_dir / self.tag / "profile",
-            )
-
-            logger.debug(f"Pipelines: {self.pipeline_templates}")
-
         configuration_engine.init_distributed()
 
+        logger.debug("Creating pipeline templates...")
+        profiler = ModelProfiler(
+            configuration_engine.tag,
+            model.__class__.__name__,
+            model.config,
+            self.plugin.microbatch_size,
+            configuration_engine.base_dir,
+        )
+
+        # Check profile data exists
+        if not profiler.profile_exists():
+            logger.debug("Profile does not exist. Start profiling.")
+            profile_dataloder = DataLoader(
+                dataloader.dataset, batch_size=self.plugin.microbatch_size
+            )
+            inputs = next(iter(profile_dataloder))
+            profiler.profile(
+                configuration_engine.local_rank, self.plugin.tp_size, inputs
+            )
+
+        # Calculate the minimum number of nodes required
+        memory = torch.cuda.get_device_properties(0).total_memory
+        min_num_nodes = max(
+            1,
+            math.ceil(profiler.mem_consumption / memory),
+        )
+        max_num_nodes = configuration_engine.world_size // self.plugin.tp_size
+
+        self.pipeline_templates = create_pipeline_templates(
+            _fullname(model),
+            self.plugin.microbatch_size,
+            list(range(min_num_nodes, max_num_nodes + 1)),
+            configuration_engine.base_dir / configuration_engine.tag / "profile",
+        )
+
+        logger.debug(f"Pipeline templates: {self.pipeline_templates}")
+
         pipeline_instantiator = PipelineInstantiator(
-            [
-                self.pipeline_templates[num_nodes]
-                for num_nodes in sorted(self.pipeline_templates.keys())
-            ],
+            self.pipeline_templates,
             self.plugin.global_batch_size // self.plugin.microbatch_size,
         )
         num_instances, num_microbatches = pipeline_instantiator.instantiate(
@@ -132,6 +130,7 @@ class ExecutionEngine:
             ),
             num_microbatches,
         )
+        self.booster = Booster(plugin=self.plugin, **self.booster_kwargs)
         return self.booster.boost(model, optimizer, criterion, dataloader, lr_scheduler)
 
     def _estimate_max_num_nodes_required(self):

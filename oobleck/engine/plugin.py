@@ -40,7 +40,6 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
 
     def __init__(
         self,
-        pipeline_templates: list[PipelineTemplate],
         tp_size: int,
         global_batch_size: int,
         microbatch_size: int,
@@ -52,16 +51,10 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
         assert (
             global_batch_size % microbatch_size == 0
         ), "Global batch size must be divisible by microbatch size. "
-        pipelines, num_microbatches = self._instantiate_pipelines(
-            pipeline_templates=pipeline_templates,
-            global_num_microbatches=global_batch_size // microbatch_size,
-        )
 
         super().__init__(
-            pipelines=pipelines,
             tp_size=tp_size,
             microbatch_size=microbatch_size,
-            num_microbatches=num_microbatches,
             precision=precision,
             enable_all_optimization=False,
             enable_fused_normalization=enable_fused_normalization,
@@ -69,7 +62,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
             enable_jit_fused=enable_jit_used,
         )
 
-        self.pipeline_templates = pipeline_templates
+        self.global_batch_size = global_batch_size
 
     def on_receive_reconfiguration_notification(self):
         """

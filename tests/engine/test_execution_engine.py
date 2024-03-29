@@ -32,7 +32,7 @@ from oobleck.engine.configuration_engine import ConfigurationEngine
 from oobleck.engine.execution_engine import ExecutionEngine
 from oobleck.engine.plugin import OobleckPlugin
 
-from ..conftest import init_profile_data
+from ..conftest import config, init_profile_data, tag
 from .conftest import (
     template_2stages,
     template_3stages,
@@ -41,7 +41,6 @@ from .data_builder import GLUEDataBuilder
 
 
 class TestExecutionEngineClass(MultiProcessTestCase):
-    tag: str = "test-gpt2"
     microbatch_size: int = 1
 
     def init_configuration_engine(self, temp_dir: Path):
@@ -53,7 +52,7 @@ class TestExecutionEngineClass(MultiProcessTestCase):
         self.pipe = pipe
 
         ConfigurationEngine.create(
-            child_pipe, self.rank // 2, self.rank % 2, self.tag, temp_dir
+            child_pipe, self.rank // 2, self.rank % 2, tag, temp_dir
         )
 
     def get_plugin(self) -> OobleckPlugin:
@@ -100,19 +99,15 @@ class TestExecutionEngineClass(MultiProcessTestCase):
         temp_dir = TemporaryDirectory()
         self.init_configuration_engine(Path(temp_dir.name))
         init_profile_data(
-            Path(temp_dir.name)
-            / self.tag
-            / "profile"
-            / f"mb_{self.microbatch_size}.csv"
+            Path(temp_dir.name) / tag / "profile" / f"mb_{self.microbatch_size}.csv"
         )
 
         plugin = self.get_plugin()
         engine = ExecutionEngine(plugin)
 
-        global config
         model = GPT2ForSequenceClassification(config)
 
-        dataloader = GLUEDataBuilder("gpt2", plugin).dataloader()
+        dataloader = GLUEDataBuilder("gpt2", plugin).train_dataloader()
 
         optimizer = Adam(model.parameters())
         lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
@@ -146,17 +141,13 @@ class TestExecutionEngineClass(MultiProcessTestCase):
         )
         assert isinstance(dataloader, HeterogeneousDataLoader)
         assert (
-            dataloader.batch_sampler and dataloader.__initialized
+            dataloader.batch_sampler and dataloader._DataLoader__initialized
         ), "HeterogeneousDataLoader.configure() is not called."
 
         assert dist.is_initialized()
 
-        assert all(
-            num_nodes == template.num_stages
-            for num_nodes, template in engine.pipeline_templates.items()
-        )
-        assert list(range(1, self.world_size // 2 + 1)) == list(
-            engine.pipeline_templates.keys()
+        assert list(range(1, self.world_size // 2 + 1)) == sorted(
+            template.num_stages for template in engine.pipeline_templates
         )
 
         assert engine.plugin.pipelines == pipelines
@@ -181,10 +172,7 @@ class TestExecutionEngineClass(MultiProcessTestCase):
         temp_dir = TemporaryDirectory()
         self.init_configuration_engine(Path(temp_dir.name))
         init_profile_data(
-            Path(temp_dir.name)
-            / self.tag
-            / "profile"
-            / f"mb_{self.microbatch_size}.csv"
+            Path(temp_dir.name) / tag / "profile" / f"mb_{self.microbatch_size}.csv"
         )
 
         plugin = self.get_plugin()
@@ -193,7 +181,7 @@ class TestExecutionEngineClass(MultiProcessTestCase):
         global config
         model = GPT2ForSequenceClassification(config)
 
-        dataloader = GLUEDataBuilder("gpt2", plugin).dataloader()
+        dataloader = GLUEDataBuilder("gpt2", plugin).train_dataloader()
 
         optimizer = Adam(model.parameters())
         lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
