@@ -16,8 +16,8 @@ from torch.utils.data import DataLoader
 from oobleck.engine.configuration_engine import ConfigurationEngine
 from oobleck.engine.pipeline_instantiator import PipelineInstantiator
 from oobleck.engine.plugin import OobleckPlugin
-from oobleck.planner import create_pipeline_templates
-from oobleck.profiler import ModelProfiler
+from oobleck.planning.planner import create_pipeline_templates
+from oobleck.planning.profiler import ModelProfiler
 
 
 class ExecutionEngine:
