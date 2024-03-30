@@ -1,7 +1,6 @@
 import csv
 import functools
 import importlib
-import multiprocessing
 from dataclasses import asdict, dataclass
 from functools import reduce
 from pathlib import Path
@@ -10,11 +9,15 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import yaml
+from colossalai.amp.naive_amp.mixed_precision_optimizer import MixedPrecisionOptimizer
+from colossalai.interface import OptimizerWrapper
 from colossalai.shardformer import ShardConfig, ShardFormer
 from loguru import logger
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 from torch.distributed import FileStore
 from transformers import PretrainedConfig, PreTrainedModel
+
+from oobleck.engine.configuration_engine import ConfigurationEngine
 
 
 @dataclass
@@ -42,83 +45,52 @@ class ModelProfiler:
     def __init__(
         self,
         tag: str,
-        model_class_name: str,
+        model_name_or_path: str,
+        optimizer_class: str,
         config: PretrainedConfig,
+        precision: str,
         microbatch_size: int,
-        base_dir: Path = Path("/tmp/oobleck"),
+        tp_size: int,
+        base_dir: Path,
     ):
-        self.model_class_name = model_class_name
+        self.model_name_or_path = model_name_or_path
         self.model_config = config
         self.microbatch_size = microbatch_size
+        self.tp_size = tp_size
         self.profile_path = base_dir / tag / "profile" / f"mb_{microbatch_size}.csv"
         self.profile_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # config_path = self.profile_path.parent / "config.yaml"
-        # if config_path.exists():
-        #     assert set(config.to_dict().items()) == set(
-        #         yaml.safe_load(config_path.read_text()).items()
-        #     ), (
-        #         "Model config mismatch. "
-        #         "Please delete the profile directory and re-run the script or use another tag."
-        #     )
+    def get_profile(
+        data, inputs: dict[str, torch.Tensor]
+    ) -> list[LayerExecutionResult]:
+        # For agent_index == 0, run _load_profile() or _profile_model()
+        # And then, rank==0 broadcasts the result
+        # For others, receive data from rank==0
+        # rank 0 must always broadcast data, since others may not have profile cache
+        assert dist.is_initialized(), "torch.distributed is not initialized."
 
-        self.profile_result = self.load_profile()
+    def _load_profile(self):
+        """If cache file exists, load it."""
+        pass
 
-    def load_profile(self) -> list[LayerExecutionResult] | None:
-        """Load the profile."""
-        if not self.profile_path.exists():
-            return None
+    def _init_profile(self, inputs: dict[str, torch.Tensor]):
+        """Profile the model with a new child process.
 
-        try:
-            with self.profile_path.open("r") as f:
-                reader = csv.DictReader(f)
-                return [
-                    LayerExecutionResult(
-                        layer_index=int(row["layer_index"]),
-                        layer_name=row["layer_name"],
-                        forward=float(row["forward"]),
-                        backward=float(row["backward"]),
-                        mem_required=int(row["mem_required"]),
-                    )
-                    for row in reader
-                ]
-        except (csv.Error, KeyError):
-            return None
+        All worker in the first agent calls this function.
+        torch.distributed is initialized using FileStore.
+        """
+        configuration_engine = ConfigurationEngine.get_instance()
+        assert configuration_engine.agent_index == 0, "Only agent 0 can profile."
 
-    @property
-    def mem_consumption(self) -> int:
-        """Get the overall memory consumption."""
-        if not self.profile_exists():
-            raise ValueError("Profile does not exist.")
-
-        return sum(result.mem_required for result in self.profile_result)
-
-    def profile_exists(self) -> bool:
-        """Check if the profile exists."""
-        return self.profile_result is not None
-
-    @staticmethod
-    def get_module_by_name(model: nn.Module, name: str) -> nn.Module:
-        """Get a module by its name."""
-        names = name.split(".")
-        return reduce(getattr, names, model)
-
-    def profile(
-        self,
-        local_rank: int,
-        tensor_parallel_size: int,
-        inputs: dict[str, torch.Tensor],
-    ):
-        """Profile the model."""
-        context = multiprocessing.get_context("spawn")
+        context = torch.multiprocessing.get_context("spawn")
         process = context.Process(
             target=ModelProfiler._profile_model,
             args=(
-                self.model_class_name,
+                self.model_name_or_path,
                 self.model_config,
                 self.profile_path,
-                local_rank,
-                tensor_parallel_size,
+                configuration_engine.local_rank,
+                self.tp_size,
                 inputs,
             ),
             daemon=True,
@@ -127,95 +99,112 @@ class ModelProfiler:
         process.join()
 
     @staticmethod
+    def get_module_by_name(model: nn.Module, name: str) -> nn.Module:
+        """Get a module by its name."""
+        names = name.split(".")
+        return reduce(getattr, names, model)
+
+    @staticmethod
     def _profile_model(
-        model_class_name: str,
+        model_name_or_path: str,
         model_config: PretrainedConfig,
+        optimizer_class: str,
         profile_path: Path,
         local_rank: int,
-        tensor_parallel_size: int,
+        tp_size: int,
+        precision: str,
         inputs: dict[str, torch.Tensor],
         warmup: int = 3,
-        repeat: int = 5,
     ):
-        """Use filestore to profile the model within a node."""
-
-        module = importlib.import_module("transformers")
-        module = getattr(module, model_class_name)
-        model: PreTrainedModel = module(model_config)
-        layers = PipelineTemplate.get_modules(model)
-
         store_path = profile_path.parent / "store"
-        logger.debug(f"Profiler initiating torch.distributed: {store_path}")
+        logger.debug(
+            f"Profiler initiating torch.distributed: {store_path} with {tp_size} workers"
+        )
 
-        store = FileStore(str(store_path), tensor_parallel_size)
+        store = FileStore(str(store_path), tp_size)
         dist.init_process_group(
             backend="nccl",
-            world_size=tensor_parallel_size,
+            world_size=tp_size,
             rank=local_rank,
             store=store,
         )
 
-        logger.debug(
-            f"Sharding model with {dist.get_process_group_ranks(dist.group.WORLD)} ranks"
-        )
+        assert dist.get_world_size() == tp_size, "World size mismatch"
+        logger.debug(f"Sharding model with {tp_size} ranks")
 
-        if tensor_parallel_size > 1:
+        module_name, cls = model_name_or_path.rsplit(".", 1)
+        module = importlib.import_module(module_name)
+        model: PreTrainedModel = getattr(module, cls)(model_config).to("cpu")
+        model.gradient_checkpointing_enable()
+        layers = PipelineTemplate.get_modules(model)
+
+        optim_name, cls = optimizer_class.rsplit(".", 1)
+        module = importlib.import_module(optim_name)
+        optim_cls = getattr(module, cls)
+
+        optimizer = optim_cls(model.parameters())
+
+        if tp_size > 1:
             shard_config = ShardConfig(
-                tensor_parallel_process_group=dist.group.WORLD,
+                tensor_parallel_process_group=dist.new_group(),
                 pipeline_stage_manager=None,
                 enable_tensor_parallelism=True,
-                enable_flash_attention=False,
+                enable_flash_attention=True,
             )
-
             shardformer = ShardFormer(shard_config)
+
             model, _ = shardformer.optimize(model)
+
+        mixed_precision = None
+        if precision == "fp16":
+            mixed_precision = torch.float16
+        elif precision == "bf16":
+            mixed_precision = torch.bfloat16
+        if mixed_precision is not None:
+            model = model.to(dtype=mixed_precision)
+
+        if precision in ["fp16", "bf16"]:
+            optimizer = MixedPrecisionOptimizer(optimizer, precision=precision)
+        else:
+            optimizer = OptimizerWrapper(optimizer)
+
+        # Configure hooks for each layer
+        def forward_pre_hook(module_name: str, module: nn.Module, inputs):
+            module.to("cuda")
+            memory[module][0] = torch.cuda.memory_allocated()
+            events[module][0].record()
+
+        def forward_hook(module_name: str, module: nn.Module, inputs, outputs):
+            memory[module][1] = torch.cuda.memory_allocated()
+            events[module][1].record()
+            module.to("cpu")
+
+        def backward_pre_hook(module_name, module: nn.Module, grad_output):
+            module.to("cuda")
+            memory[module][2] = torch.cuda.memory_allocated()
+            events[module][2].record()
+
+        def backward_hook(module_name, module: nn.Module, grad_input, grad_output):
+            memory[module][3] = torch.cuda.memory_allocated()
+            events[module][3].record()
+            module.to("cpu")
 
         # Move inputs to cuda
         for name in inputs.keys():
             inputs[name] = inputs[name].to("cuda")
             inputs[name].requires_grad = inputs[name].is_floating_point()
 
+        logger.info("Profiler started...")
+
         events: dict[nn.Module, list[torch.cuda.Event]] = {}
         memory: dict[nn.Module, list[int]] = {}
 
-        logger.debug("Profiler started...")
-
-        init_memory = torch.cuda.memory_allocated()
         for layer_name in layers:
             module = ModelProfiler.get_module_by_name(model, layer_name)
 
             # forward start, forward end, backward start, backward end
             events[module] = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
             memory[module] = [0 for _ in range(4)]
-
-            def forward_pre_hook(module_name, module, inputs):
-                module.to("cuda")
-                memory[module][0] = torch.cuda.memory_allocated() - init_memory
-                events[module][0].record()
-
-            def forward_hook(module_name, module, inputs, outputs):
-                memory[module][1] = torch.cuda.memory_allocated() - init_memory
-                events[module][1].record()
-                if not (
-                    model.config.tie_word_embeddings
-                    and module == model.get_input_embeddings()
-                ):
-                    module.to("cpu")
-
-            def backward_pre_hook(module_name, module, grad_output):
-                module.to("cuda")
-                memory[module][2] = torch.cuda.memory_allocated() - init_memory
-                events[module][2].record()
-
-            def backward_hook(module_name, module, grad_input, grad_output):
-                memory[module][3] = torch.cuda.memory_allocated() - init_memory
-                events[module][3].record()
-
-                if not (
-                    model.config.tie_word_embeddings
-                    and module == model.get_input_embeddings()
-                ):
-                    module.to("cpu")
 
             module.register_forward_pre_hook(
                 functools.partial(forward_pre_hook, layer_name)
@@ -232,11 +221,18 @@ class ModelProfiler:
             for _ in range(warmup):
                 model(**inputs)
 
-        for _ in range(repeat):
+        should_continue: bool = True
+
+        while should_continue:
             outputs = model(**inputs)
-            loss = outputs["loss"]
-            loss.backward()
-            model.zero_grad()
+            loss = outputs.loss
+            optimizer.backward(loss)
+            if (
+                mixed_precision is None
+                or not optimizer.mixed_precision.should_skip_step()
+            ):
+                should_continue = False
+                optimizer.step()
 
         torch.cuda.synchronize()
 
@@ -254,7 +250,9 @@ class ModelProfiler:
                     module = ModelProfiler.get_module_by_name(model, layer_name)
                     forward = events[module][0].elapsed_time(events[module][1])
                     backward = events[module][2].elapsed_time(events[module][3])
-                    mem_required = memory[module][3]
+                    mem_required = (memory[module][3] - memory[module][2]) + (
+                        memory[module][1] - memory[module][0]
+                    )
 
                     result = LayerExecutionResult(
                         layer_index=index,
@@ -270,6 +268,9 @@ class ModelProfiler:
             config_path = profile_path.parent / "config.yaml"
             with config_path.open("w") as f:
                 yaml.safe_dump(model_config.to_dict(), f)
+
+            # TODO: merge config, and profile data altogether.
+            # Add microbatch_size and tp_size into file name
 
         dist.barrier()
         dist.destroy_process_group()
