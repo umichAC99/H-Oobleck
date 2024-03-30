@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from torch.profiler import ProfilerActivity, profile
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     cleanup_temp_dir,
@@ -75,24 +74,17 @@ class TestProfileModelClass(MultiProcessTestCase):
         dataloader = GLUEDataBuilder("gpt2").dataloader(batch_size=16)
         inputs = next(iter(dataloader))
 
-        with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        ) as prof:
-            ModelProfiler._profile_model(
-                model_name_or_path=model_name,
-                model_config=config,
-                optimizer_class="torch.optim.Adam",
-                profile_path=profile_dir / f"mb_{microbatch_size}.csv",
-                local_rank=self.rank,
-                tp_size=self.world_size,
-                precision=precision,
-                inputs=inputs,
-                warmup=1,
-            )
-
-        if self.rank == 0:
-            print("Exporting chrome trace")
-            prof.export_chrome_trace("/data/insujang/profiler_trace.json")
+        ModelProfiler._profile_model(
+            model_name_or_path=model_name,
+            model_config=config,
+            optimizer_class="torch.optim.Adam",
+            profile_path=profile_dir / f"mb_{microbatch_size}.csv",
+            local_rank=self.rank,
+            tp_size=self.world_size,
+            precision=precision,
+            inputs=inputs,
+            warmup=1,
+        )
 
 
 instantiate_parametrized_tests(TestProfileModelClass)

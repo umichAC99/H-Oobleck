@@ -223,16 +223,21 @@ class ModelProfiler:
 
         should_continue: bool = True
 
+        num_iterations = 0
         while should_continue:
             outputs = model(**inputs)
-            loss = outputs.loss
-            optimizer.backward(loss)
+            optimizer.backward(outputs.loss)
             if (
                 mixed_precision is None
                 or not optimizer.mixed_precision.should_skip_step()
             ):
+                logger.info(f"Iteration {num_iterations} optimizer step")
                 should_continue = False
                 optimizer.step()
+            optimizer.zero_grad()
+            for param in model.parameters():
+                param.grad = None
+            num_iterations += 1
 
         torch.cuda.synchronize()
 
