@@ -1,7 +1,10 @@
+import multiprocessing
 import os
+import shutil
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 import yaml
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
@@ -11,36 +14,19 @@ from torch.testing._internal.common_distributed import (
     skip_if_lt_x_gpu,
 )
 from torch.testing._internal.common_utils import (
+    FILE_SCHEMA,
     instantiate_parametrized_tests,
     parametrize,
 )
 
+from oobleck.elastic.run import HostInfo
+from oobleck.engine.configuration_engine import ConfigurationEngine
 from oobleck.planning.profiler import ModelProfiler
 
 from ..conftest import config, model_name, modules, tag
 from .data_builder import GLUEDataBuilder
 
 microbatch_size = 1
-
-# def test_profile_model(tmp_path: Path, model: PreTrainedModel):
-#     profiler = ModelProfiler(
-#         tag=tag,
-#         model_class_name=model_name,
-#         config=config,
-#         microbatch_size=microbatch_size,
-#         base_dir=tmp_path,
-#     )
-#     assert not profiler.profile_exists()
-
-#     batch = model.dummy_inputs
-#     batch["labels"] = batch["input_ids"]
-#     profiler.profile(batch)
-
-#     assert profiler.profile_exists() is True
-#     with open(profiler.profile_path) as f:
-#         reader = csv.DictReader(f)
-#         rows = list(reader)
-#     assert [row["layer_name"] for row in rows] == modules
 
 
 class TestProfileModelClass(MultiProcessTestCase):
@@ -55,17 +41,69 @@ class TestProfileModelClass(MultiProcessTestCase):
 
     def tearDown(self):
         cleanup_temp_dir()
+        ConfigurationEngine._instance = None
         super().tearDown()
+
+    def init_configuration_engine(self, temp_dir: Path):
+        pipe, child_pipe = multiprocessing.Pipe()
+        # dist info
+        pipe.send([HostInfo("127.0.0.1", self.world_size, 1234)])
+        self.pipe = pipe
+        ConfigurationEngine.create(child_pipe, 0, self.rank, tag, temp_dir)
+
+    def init_distributed(self):
+        print(f"dist init r={self.rank}, world={self.world_size}")
+        dist.init_process_group(
+            init_method=f"{FILE_SCHEMA}{self.file_name}",
+            backend="nccl",
+            world_size=self.world_size,
+            rank=self.rank,
+        )
+        dist.barrier()
+        torch.cuda.synchronize()
 
     @parametrize("precision", ["fp16", "bf16", "fp32"])
     @requires_nccl()
     @skip_if_lt_x_gpu(4)
-    def test_profile_model(self, precision: str):
+    def test_profile_api(self, precision: str):
+        """This tests the public get_profile() method."""
         temp_path = Path(os.environ["TEMP_DIR"])
         profile_dir = temp_path / tag / "profile"
         profile_dir.mkdir(parents=True, exist_ok=True)
 
         torch.cuda.set_device(self.rank)
+        self.init_configuration_engine(temp_path)
+
+        profiler = ModelProfiler(
+            tag=tag,
+            model_name_or_path=model_name,
+            optimizer_class="torch.optim.Adam",
+            config=config,
+            precision=precision,
+            tp_size=4,
+            base_dir=temp_path,
+        )
+
+        dataloader = GLUEDataBuilder("gpt2").dataloader(batch_size=16)
+        inputs = next(iter(dataloader))
+        profiler.init_profile(inputs)
+
+        self.init_distributed()
+        profile_result = profiler.load_profile(16)
+
+        results = [None, None, None, None]
+        dist.all_gather_object(results, profile_result)
+        assert all([result == profile_result for result in results])
+
+    @parametrize("precision", ["fp16", "bf16", "fp32"])
+    @requires_nccl()
+    @skip_if_lt_x_gpu(4)
+    def test_profile_model(self, precision: str):
+        """This tests the private _profile_model() method."""
+        temp_path = Path(os.environ["TEMP_DIR"])
+        profile_dir = temp_path / tag / "profile"
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        profile_dir.mkdir(parents=True, exist_ok=True)
 
         dataloader = GLUEDataBuilder("gpt2").dataloader(batch_size=16)
         inputs = next(iter(dataloader))

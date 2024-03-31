@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import yaml
+from colossalai.accelerator import get_accelerator
 from colossalai.amp.naive_amp.mixed_precision_optimizer import MixedPrecisionOptimizer
 from colossalai.booster.plugin.hybrid_parallel_plugin import get_param_info
 from colossalai.interface import OptimizerWrapper
@@ -28,22 +29,6 @@ class LayerExecutionResult:
     forward: float
     backward: float
     mem_required: int
-
-
-class EventTiming(Enum):
-    FORWARD_START = 0
-    FORWARD_END = 1
-    BACKWARD_START = 2
-    BACKWARD_END = 3
-    OPTIMIZER_STEP_START = 4
-    OPTIMIZER_STEP_END = 5
-
-
-@dataclass
-class ProfileData:
-    module_name: str
-    events: dict[EventTiming, torch.cuda.Event] = field(default_factory=dict)
-    memory: dict[EventTiming, int] = field(default_factory=dict)
 
 
 class ModelProfiler:
@@ -66,54 +51,100 @@ class ModelProfiler:
         optimizer_class: str,
         config: PretrainedConfig,
         precision: str,
-        microbatch_size: int,
         tp_size: int,
         base_dir: Path,
     ):
         self.model_name_or_path = model_name_or_path
+        self.optimizer_class = optimizer_class
+        self.precision = precision
         self.model_config = config
-        self.microbatch_size = microbatch_size
         self.tp_size = tp_size
-        self.profile_path = base_dir / tag / "profile" / f"mb_{microbatch_size}.csv"
-        self.profile_path.parent.mkdir(parents=True, exist_ok=True)
+        self.profile_dir = base_dir / tag / "profile"
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_profile(
-        data, inputs: dict[str, torch.Tensor]
-    ) -> list[LayerExecutionResult]:
-        # For agent_index == 0, run _load_profile() or _profile_model()
-        # And then, rank==0 broadcasts the result
-        # For others, receive data from rank==0
-        # rank 0 must always broadcast data, since others may not have profile cache
-        assert dist.is_initialized(), "torch.distributed is not initialized."
+    @staticmethod
+    def get_profile_path(
+        profile_dir: Path, tp_size: int, microbatch_size: int, precision: str
+    ) -> Path:
+        return profile_dir / f"profile_tp{tp_size}_mb{microbatch_size}_{precision}.yaml"
 
-    def _load_profile(self):
-        """If cache file exists, load it."""
-        pass
-
-    def _init_profile(self, inputs: dict[str, torch.Tensor]):
+    def init_profile(self, inputs: dict[str, torch.Tensor]):
         """Profile the model with a new child process.
 
-        All worker in the first agent calls this function.
-        torch.distributed is initialized using FileStore.
+        All processes calls this function, and all workers in the first agent
+        actually profile the model.
         """
+        assert not dist.is_initialized(), "torch.distributed should not be initialized."
         configuration_engine = ConfigurationEngine.get_instance()
-        assert configuration_engine.agent_index == 0, "Only agent 0 can profile."
+
+        if configuration_engine.agent_index != 0:
+            return
+
+        microbatch_size = inputs["input_ids"].shape[0]
+        profile_path = ModelProfiler.get_profile_path(
+            self.profile_dir, self.tp_size, microbatch_size, self.precision
+        )
+        if profile_path.exists():
+            logger.debug(f"Profile exists: {profile_path}")
+            return
 
         context = torch.multiprocessing.get_context("spawn")
         process = context.Process(
             target=ModelProfiler._profile_model,
-            args=(
-                self.model_name_or_path,
-                self.model_config,
-                self.profile_path,
-                configuration_engine.local_rank,
-                self.tp_size,
-                inputs,
-            ),
+            kwargs={
+                "model_name_or_path": self.model_name_or_path,
+                "model_config": self.model_config,
+                "optimizer_class": self.optimizer_class,
+                "profile_dir": self.profile_dir,
+                "local_rank": configuration_engine.local_rank,
+                "tp_size": self.tp_size,
+                "precision": self.precision,
+                "inputs": inputs,
+            },
             daemon=True,
         )
         process.start()
         process.join()
+
+    def load_profile(self, microbatch_size: int) -> list[LayerExecutionResult]:
+        """Load profile data from storage.
+
+        Only rank 0 loads profile data, which is broadcasted to all others.
+        """
+        assert dist.is_initialized(), "torch.distributed is not initialized."
+
+        configuration_engine = ConfigurationEngine.get_instance()
+        device = get_accelerator().get_current_device()
+        size_tensor = torch.empty(1, dtype=torch.int64, device=device)
+        if configuration_engine.rank == 0:
+            profile_path = ModelProfiler.get_profile_path(
+                self.profile_dir, self.tp_size, microbatch_size, self.precision
+            )
+            data = profile_path.read_bytes()
+            data_tensor = torch.tensor(list(data), dtype=torch.uint8, device=device)
+            size_tensor[0] = data_tensor.numel()
+
+        dist.broadcast(size_tensor, src=0)
+
+        if configuration_engine.rank != 0:
+            data_tensor = torch.empty(
+                size_tensor.item(), dtype=torch.uint8, device=device
+            )
+
+        dist.broadcast(data_tensor, src=0)
+        torch.cuda.synchronize()
+
+        data = yaml.safe_load(data_tensor.cpu().numpy().tobytes())
+        return [
+            LayerExecutionResult(
+                layer_index=layer["layer_index"],
+                layer_name=layer["layer_name"],
+                forward=layer["forward"],
+                backward=layer["backward"],
+                mem_required=layer["mem_required"],
+            )
+            for layer in data["layers"]
+        ]
 
     @staticmethod
     def get_module_by_name(model: nn.Module, name: str) -> nn.Module:
@@ -133,6 +164,22 @@ class ModelProfiler:
         inputs: dict[str, torch.Tensor],
         warmup: int = 3,
     ):
+        class EventTiming(Enum):
+            FORWARD_START = 0
+            FORWARD_END = 1
+            BACKWARD_START = 2
+            BACKWARD_END = 3
+            OPTIMIZER_STEP_START = 4
+            OPTIMIZER_STEP_END = 5
+
+        @dataclass
+        class ProfileData:
+            module_name: str
+            events: dict[EventTiming, torch.cuda.Event] = field(default_factory=dict)
+            memory: dict[EventTiming, int] = field(default_factory=dict)
+
+        torch.cuda.set_device(local_rank)
+
         store_path = profile_dir / "store"
         logger.debug(
             f"Profiler initiating torch.distributed: {store_path} with {tp_size} workers"
@@ -315,9 +362,8 @@ class ModelProfiler:
 
         if dist.get_rank() == 0:
             microbatch_size = inputs["input_ids"].shape[0]
-            profile_path = (
-                profile_dir
-                / f"profile_tp{tp_size}_mb{microbatch_size}_{precision}.yaml"
+            profile_path = ModelProfiler.get_profile_path(
+                profile_dir, tp_size, microbatch_size, precision
             )
             logger.debug(f"Writing results to {profile_path}")
 
@@ -366,3 +412,5 @@ class ModelProfiler:
 
         dist.barrier()
         torch.cuda.synchronize()
+
+        dist.destroy_process_group()
