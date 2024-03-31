@@ -1,7 +1,7 @@
-import csv
 import functools
 import importlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from enum import Enum
 from functools import reduce
 from pathlib import Path
 
@@ -10,6 +10,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import yaml
 from colossalai.amp.naive_amp.mixed_precision_optimizer import MixedPrecisionOptimizer
+from colossalai.booster.plugin.hybrid_parallel_plugin import get_param_info
 from colossalai.interface import OptimizerWrapper
 from colossalai.shardformer import ShardConfig, ShardFormer
 from loguru import logger
@@ -27,6 +28,22 @@ class LayerExecutionResult:
     forward: float
     backward: float
     mem_required: int
+
+
+class EventTiming(Enum):
+    FORWARD_START = 0
+    FORWARD_END = 1
+    BACKWARD_START = 2
+    BACKWARD_END = 3
+    OPTIMIZER_STEP_START = 4
+    OPTIMIZER_STEP_END = 5
+
+
+@dataclass
+class ProfileData:
+    module_name: str
+    events: dict[EventTiming, torch.cuda.Event] = field(default_factory=dict)
+    memory: dict[EventTiming, int] = field(default_factory=dict)
 
 
 class ModelProfiler:
@@ -109,14 +126,14 @@ class ModelProfiler:
         model_name_or_path: str,
         model_config: PretrainedConfig,
         optimizer_class: str,
-        profile_path: Path,
+        profile_dir: Path,
         local_rank: int,
         tp_size: int,
         precision: str,
         inputs: dict[str, torch.Tensor],
         warmup: int = 3,
     ):
-        store_path = profile_path.parent / "store"
+        store_path = profile_dir / "store"
         logger.debug(
             f"Profiler initiating torch.distributed: {store_path} with {tp_size} workers"
         )
@@ -136,13 +153,22 @@ class ModelProfiler:
         module = importlib.import_module(module_name)
         model: PreTrainedModel = getattr(module, cls)(model_config).to("cpu")
         model.gradient_checkpointing_enable()
+
         layers = PipelineTemplate.get_modules(model)
+        profile_data: dict[str, ProfileData] = {
+            layer_name: ProfileData(
+                module_name=layer_name,
+                events={
+                    timing: torch.cuda.Event(enable_timing=True)
+                    for timing in EventTiming
+                },
+            )
+            for layer_name in layers
+        }
 
         optim_name, cls = optimizer_class.rsplit(".", 1)
         module = importlib.import_module(optim_name)
         optim_cls = getattr(module, cls)
-
-        optimizer = optim_cls(model.parameters())
 
         if tp_size > 1:
             shard_config = ShardConfig(
@@ -163,6 +189,8 @@ class ModelProfiler:
         if mixed_precision is not None:
             model = model.to(dtype=mixed_precision)
 
+        optimizer = optim_cls(model.parameters())
+        optim_param_info = get_param_info(optimizer)
         if precision in ["fp16", "bf16"]:
             optimizer = MixedPrecisionOptimizer(optimizer, precision=precision)
         else:
@@ -171,40 +199,44 @@ class ModelProfiler:
         # Configure hooks for each layer
         def forward_pre_hook(module_name: str, module: nn.Module, inputs):
             module.to("cuda")
-            memory[module][0] = torch.cuda.memory_allocated()
-            events[module][0].record()
+            profile_data[module_name].memory[EventTiming.FORWARD_START] = (
+                torch.cuda.memory_allocated()
+            )
+            event = profile_data[module_name].events[EventTiming.FORWARD_START]
+            event.record()
 
         def forward_hook(module_name: str, module: nn.Module, inputs, outputs):
-            memory[module][1] = torch.cuda.memory_allocated()
-            events[module][1].record()
+            profile_data[module_name].memory[EventTiming.FORWARD_END] = (
+                torch.cuda.memory_allocated()
+            )
+            event = profile_data[module_name].events[EventTiming.FORWARD_END]
+            event.record()
             module.to("cpu")
 
         def backward_pre_hook(module_name, module: nn.Module, grad_output):
             module.to("cuda")
-            memory[module][2] = torch.cuda.memory_allocated()
-            events[module][2].record()
+            profile_data[module_name].memory[EventTiming.BACKWARD_START] = (
+                torch.cuda.memory_allocated()
+            )
+            event = profile_data[module_name].events[EventTiming.BACKWARD_START]
+            event.record()
 
         def backward_hook(module_name, module: nn.Module, grad_input, grad_output):
-            memory[module][3] = torch.cuda.memory_allocated()
-            events[module][3].record()
+            profile_data[module_name].memory[EventTiming.BACKWARD_END] = (
+                torch.cuda.memory_allocated()
+            )
+            event = profile_data[module_name].events[EventTiming.BACKWARD_END]
+            event.record()
             module.to("cpu")
 
         # Move inputs to cuda
         for name in inputs.keys():
             inputs[name] = inputs[name].to("cuda")
-            inputs[name].requires_grad = inputs[name].is_floating_point()
 
         logger.info("Profiler started...")
 
-        events: dict[nn.Module, list[torch.cuda.Event]] = {}
-        memory: dict[nn.Module, list[int]] = {}
-
         for layer_name in layers:
             module = ModelProfiler.get_module_by_name(model, layer_name)
-
-            # forward start, forward end, backward start, backward end
-            events[module] = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
-            memory[module] = [0 for _ in range(4)]
 
             module.register_forward_pre_hook(
                 functools.partial(forward_pre_hook, layer_name)
@@ -223,59 +255,110 @@ class ModelProfiler:
 
         should_continue: bool = True
 
-        num_iterations = 0
         while should_continue:
+            logger.debug("Iterating until overflow solved...")
             outputs = model(**inputs)
             optimizer.backward(outputs.loss)
+            torch.cuda.synchronize()
+
             if (
                 mixed_precision is None
                 or not optimizer.mixed_precision.should_skip_step()
             ):
-                logger.info(f"Iteration {num_iterations} optimizer step")
                 should_continue = False
+                for param in model.parameters():
+                    param.grad.data = param.grad.to("cpu")
+
+                for layer_name in layers:
+                    profile_data[layer_name].memory[
+                        EventTiming.OPTIMIZER_STEP_START
+                    ] = 0
+                    profile_data[layer_name].memory[EventTiming.OPTIMIZER_STEP_END] = 0
                 optimizer.step()
+
+                num_parameters = 0
+                working_to_master_map = optimizer.get_working_to_master_map()
+                for layer_name in layers:
+                    module = ModelProfiler.get_module_by_name(model, layer_name)
+                    for p in module.parameters():
+                        if precision in ["fp16", "bf16"]:
+                            optim_param_index_id = optim_param_info["id2param"][
+                                num_parameters
+                            ]
+                            master_tensor = working_to_master_map[optim_param_index_id]
+                            states: dict[torch.Tensor, dict] = (
+                                optimizer.optim.state.get(master_tensor)
+                            )
+                        else:
+                            states: dict[torch.Tensor, dict] = (
+                                optimizer.optim.state.get(p)
+                            )
+
+                        if states:
+                            for name, state in states.items():
+                                if isinstance(state, torch.Tensor):
+                                    profile_data[layer_name].memory[
+                                        EventTiming.OPTIMIZER_STEP_END
+                                    ] += state.numel() * state.element_size()
+
+                        num_parameters += 1
+
             optimizer.zero_grad()
             for param in model.parameters():
                 param.grad = None
-            num_iterations += 1
-
-        torch.cuda.synchronize()
 
         logger.debug("Profiler finished.")
 
         if dist.get_rank() == 0:
+            microbatch_size = inputs["input_ids"].shape[0]
+            profile_path = (
+                profile_dir
+                / f"profile_tp{tp_size}_mb{microbatch_size}_{precision}.yaml"
+            )
             logger.debug(f"Writing results to {profile_path}")
-            with profile_path.open("w") as f:
-                writer = csv.DictWriter(
-                    f, fieldnames=LayerExecutionResult.__annotations__.keys()
+
+            data = {
+                "model_name": model_name_or_path,
+                "model_config": model_config.to_dict(),
+                "microbatch_size": microbatch_size,
+                "tp_size": tp_size,
+                "precision": precision,
+                "layers": [],
+            }
+            for index, (layer_name, layer_profile) in enumerate(profile_data.items()):
+                data["layers"].append(
+                    asdict(
+                        LayerExecutionResult(
+                            layer_index=index,
+                            layer_name=layer_name,
+                            forward=layer_profile.events[
+                                EventTiming.FORWARD_START
+                            ].elapsed_time(
+                                layer_profile.events[EventTiming.FORWARD_END]
+                            ),
+                            backward=layer_profile.events[
+                                EventTiming.BACKWARD_START
+                            ].elapsed_time(
+                                layer_profile.events[EventTiming.BACKWARD_END]
+                            ),
+                            mem_required=(
+                                layer_profile.memory[EventTiming.FORWARD_END]
+                                - layer_profile.memory[EventTiming.FORWARD_START]
+                            )
+                            + (
+                                layer_profile.memory[EventTiming.BACKWARD_END]
+                                - layer_profile.memory[EventTiming.BACKWARD_START]
+                            )
+                            + (
+                                layer_profile.memory[EventTiming.OPTIMIZER_STEP_END]
+                                - layer_profile.memory[EventTiming.OPTIMIZER_STEP_START]
+                            ),
+                        )
+                    )
                 )
-                writer.writeheader()
 
-                for index, layer_name in enumerate(layers):
-                    module = ModelProfiler.get_module_by_name(model, layer_name)
-                    forward = events[module][0].elapsed_time(events[module][1])
-                    backward = events[module][2].elapsed_time(events[module][3])
-                    mem_required = (memory[module][3] - memory[module][2]) + (
-                        memory[module][1] - memory[module][0]
-                    )
-
-                    result = LayerExecutionResult(
-                        layer_index=index,
-                        layer_name=layer_name,
-                        forward=forward,
-                        backward=backward,
-                        mem_required=mem_required,
-                    )
-                    writer.writerow(asdict(result))
-
-            store_path.unlink()
-
-            config_path = profile_path.parent / "config.yaml"
-            with config_path.open("w") as f:
-                yaml.safe_dump(model_config.to_dict(), f)
-
-            # TODO: merge config, and profile data altogether.
-            # Add microbatch_size and tp_size into file name
+            with profile_path.open("w") as f:
+                yaml.safe_dump(data, f)
 
         dist.barrier()
-        dist.destroy_process_group()
+        torch.cuda.synchronize()

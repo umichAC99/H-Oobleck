@@ -12,6 +12,7 @@ config: GPT2Config = GPT2Config.from_pretrained("gpt2")
 config.is_decoder = True
 config.n_layer = 4
 config.num_labels = GLUEDataBuilder.glue_task_num_labels["mrpc"]
+config.pad_token_id = config.eos_token_id
 
 modules: list[str] = GPT2ForSequenceClassificationPolicy.get_all_modules(config)
 model_name: str = "transformers.models.gpt2.modeling_gpt2.GPT2ForSequenceClassification"

@@ -1,11 +1,8 @@
-import csv
 import os
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from unittest.mock import patch
 
-import pytest
 import torch
+import yaml
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     cleanup_temp_dir,
@@ -17,7 +14,6 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
-from transformers import GPT2ForSequenceClassification, PreTrainedModel
 
 from oobleck.planning.profiler import ModelProfiler
 
@@ -78,13 +74,27 @@ class TestProfileModelClass(MultiProcessTestCase):
             model_name_or_path=model_name,
             model_config=config,
             optimizer_class="torch.optim.Adam",
-            profile_path=profile_dir / f"mb_{microbatch_size}.csv",
+            profile_dir=profile_dir,
             local_rank=self.rank,
             tp_size=self.world_size,
             precision=precision,
             inputs=inputs,
             warmup=1,
         )
+
+        microbatch_size = inputs["input_ids"].shape[0]
+        profile_path = (
+            profile_dir
+            / f"profile_tp{self.world_size}_mb{microbatch_size}_{precision}.yaml"
+        )
+
+        assert profile_path.exists()
+        data = yaml.safe_load(profile_path.read_text())
+        assert data["precision"] == precision
+        assert data["tp_size"] == self.world_size
+        assert data["model_name"] == model_name
+        assert len(data["layers"]) == len(modules)
+        assert [layer["layer_name"] for layer in data["layers"]] == modules
 
 
 instantiate_parametrized_tests(TestProfileModelClass)
