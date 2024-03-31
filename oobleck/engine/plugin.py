@@ -52,6 +52,11 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
             global_batch_size % microbatch_size == 0
         ), "Global batch size must be divisible by microbatch size. "
 
+        configuration_engine = ConfigurationEngine.get_instance()
+        assert all(
+            host.slots == tp_size for host in configuration_engine.dist_info
+        ), f"All agent must have the same worker size {tp_size}."
+
         super().__init__(
             tp_size=tp_size,
             microbatch_size=microbatch_size,
