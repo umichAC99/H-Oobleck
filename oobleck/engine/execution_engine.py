@@ -66,6 +66,10 @@ class ExecutionEngine:
         create pipeline templates, instantiate pipelines, and then boost the model.
         """
 
+        assert (
+            not dist.is_initialized()
+        ), "Distributed environment must not be initialized."
+
         if self.pipeline_templates is not None:
             raise RuntimeError(
                 "Pipeline templates are already initialized. "
@@ -73,36 +77,35 @@ class ExecutionEngine:
             )
 
         configuration_engine = ConfigurationEngine.get_instance()
-        configuration_engine.init_distributed()
 
-        logger.debug("Creating pipeline templates...")
         profiler = ModelProfiler(
             configuration_engine.tag,
-            model.__class__.__name__,
-            model.config,
-            self.plugin.microbatch_size,
-            configuration_engine.base_dir,
+            model_name_or_path=_fullname(model),
+            optimize_class=_fullname(optimizer),
+            model_config=model.config,
+            precision=self.plugin.precision,
+            tp_size=self.plugin.tp_size,
+            base_dir=configuration_engine.base_dir,
         )
 
-        # Check profile data exists
-        if not profiler.profile_exists():
-            logger.debug("Profile does not exist. Start profiling.")
-            profile_dataloder = DataLoader(
-                dataloader.dataset, batch_size=self.plugin.microbatch_size
-            )
-            inputs = next(iter(profile_dataloder))
-            profiler.profile(
-                configuration_engine.local_rank, self.plugin.tp_size, inputs
-            )
+        profile_dataloder = DataLoader(
+            dataloader.dataset, batch_size=self.plugin.microbatch_size
+        )
+        inputs = next(iter(profile_dataloder))
+        profiler.init_profile(inputs)
+
+        configuration_engine.init_distributed()
+        profile_data = profiler.load_profile(self.plugin.microbatch_size)
 
         # Calculate the minimum number of nodes required
         memory = torch.cuda.get_device_properties(0).total_memory
         min_num_nodes = max(
             1,
-            math.ceil(profiler.mem_consumption / memory),
+            math.ceil(sum(layer.mem_required for layer in profile_data) / memory),
         )
         max_num_nodes = configuration_engine.world_size // self.plugin.tp_size
 
+        logger.debug("Creating pipeline templates...")
         self.pipeline_templates = create_pipeline_templates(
             _fullname(model),
             self.plugin.microbatch_size,
