@@ -277,7 +277,11 @@ class ModelProfiler:
                 optimizer.step()
 
                 num_parameters = 0
-                working_to_master_map = optimizer.get_working_to_master_map()
+                working_to_master_map = (
+                    optimizer.get_working_to_master_map()
+                    if (precision in ["fp16", "bf16"])
+                    else None
+                )
                 for layer_name in layers:
                     module = ModelProfiler.get_module_by_name(model, layer_name)
                     for p in module.parameters():
