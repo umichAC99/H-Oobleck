@@ -71,7 +71,12 @@ class TestProfileModelClass(MultiProcessTestCase):
         profile_dir = temp_path / tag / "profile"
         profile_dir.mkdir(parents=True, exist_ok=True)
 
+        # This is to use different GPUs in distributed communication
         torch.cuda.set_device(self.rank)
+        # This doesn't affect the current process, but will affect
+        # child process that will be spawned during `init_profile()`.
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(self.rank)
+
         self.init_configuration_engine(temp_path)
 
         profiler = ModelProfiler(
@@ -102,8 +107,9 @@ class TestProfileModelClass(MultiProcessTestCase):
         """This tests the private _profile_model() method."""
         temp_path = Path(os.environ["TEMP_DIR"])
         profile_dir = temp_path / tag / "profile"
-        shutil.rmtree(profile_dir, ignore_errors=True)
         profile_dir.mkdir(parents=True, exist_ok=True)
+
+        torch.cuda.set_device(self.rank)
 
         dataloader = GLUEDataBuilder("gpt2").dataloader(batch_size=16)
         inputs = next(iter(dataloader))
@@ -121,9 +127,8 @@ class TestProfileModelClass(MultiProcessTestCase):
         )
 
         microbatch_size = inputs["input_ids"].shape[0]
-        profile_path = (
-            profile_dir
-            / f"profile_tp{self.world_size}_mb{microbatch_size}_{precision}.yaml"
+        profile_path = ModelProfiler.get_profile_path(
+            profile_dir, self.world_size, microbatch_size, precision
         )
 
         assert profile_path.exists()

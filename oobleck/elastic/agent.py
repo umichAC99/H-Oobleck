@@ -124,13 +124,7 @@ class Agent:
         raise NotImplementedError()
 
     def launch_workers(self):
-        """Launch worker processes.
-
-        Before launching workers, check if profile data exists
-        in this node. If not, call run_profiler() to collect
-        profile data.
-        TODO (insujang): implement run_profiler()
-        """
+        """Launch worker processes."""
         ctx: SpawnContext = multiprocessing.get_context("spawn")
 
         tensor_parallel_size = self.dist_info[0].slots
@@ -139,14 +133,12 @@ class Agent:
             (self.agent_index + 1) * tensor_parallel_size,
         )
 
-        # env_backup = os.environ.copy()
-
         for gpu_index, rank in enumerate(ranks):
             logger.info(f"Launching worker {rank} (GPU: {gpu_index})...")
 
             pipe, child_pipe = ctx.Pipe()
 
-            # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
             process: SpawnProcess = ctx.Process(
                 target=Worker.worker_main,
                 args=(
@@ -158,13 +150,12 @@ class Agent:
                     self.script,
                     self.script_args,
                 ),
-                daemon=True,
             )
             process.start()
             self.workers.append(Worker(pipe, process))
             pipe.send(self.dist_info)
 
-        # os.environ = env_backup
+        del os.environ["CUDA_VISIBLE_DEVICES"]
 
         # If this is the first agent, it should forward the master rank port
         if self.agent_index == 0:

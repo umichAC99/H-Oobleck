@@ -185,8 +185,6 @@ class ModelProfiler:
             events: dict[EventTiming, torch.cuda.Event] = field(default_factory=dict)
             memory: dict[EventTiming, int] = field(default_factory=dict)
 
-        torch.cuda.set_device(local_rank)
-
         store_path = profile_dir / "store"
         logger.debug(
             f"Profiler initiating torch.distributed: {store_path} with {tp_size} workers"
