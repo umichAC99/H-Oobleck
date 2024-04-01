@@ -3,7 +3,7 @@ mod execution_result;
 mod pipeline_template_generator;
 use env_logger;
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::PyDict;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -42,7 +42,7 @@ fn create_pipeline_templates(
     tp_size: u32,
     precision: String,
     mut num_nodes: Vec<u32>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyDict>> {
     num_nodes.sort();
 
     let mut generator =
@@ -50,7 +50,7 @@ fn create_pipeline_templates(
     generator.divide_and_conquer(num_nodes[num_nodes.len() - 1])?;
 
     Python::with_gil(|py| {
-        let mut results: Vec<PyObject> = Vec::new();
+        let results = PyDict::new_bound(py);
 
         let module = PyModule::import_bound(py, "oobleck_colossalai.pipeline_template")?;
         let class = module.getattr("PipelineTemplate")?.into_py(py);
@@ -68,10 +68,10 @@ fn create_pipeline_templates(
                     ),
                 )?
                 .to_object(py);
-            results.push(py_template);
+            results.set_item(template.stages.len(), py_template)?;
         }
 
-        Ok(PyList::new_bound(py, results).to_object(py))
+        Ok(results.into())
     })
 }
 

@@ -42,11 +42,12 @@ class ExecutionEngine:
 
         self.plugin = plugin
 
-        self.pipeline_templates: list[PipelineTemplate] | None = None
+        self.pipeline_templates: dict[int, PipelineTemplate] | None = None
         self.booster: Booster | None = None
         self.booster_kwargs = booster_kwargs
 
         self.notification_receiver_thread: Thread | None = None
+        self.need_reconfiguration: bool = False
 
     @property
     def is_master(self) -> bool:
@@ -150,6 +151,8 @@ class ExecutionEngine:
         configuration_engine = ConfigurationEngine.get_instance()
         configuration_engine.recv_reconfiguration_notification()
         self.on_receive_reconfiguration_notifiation()
+        self.need_reconfiguration = True
+        logger.info("Failure watcher received notification and terminated.")
 
     def on_receive_reconfiguration_notifiation(self):
         """
@@ -169,6 +172,9 @@ class ExecutionEngine:
         return_loss: bool = True,
         return_outputs: bool = False,
     ) -> dict[str, Any] | None:
+        if self.need_reconfiguration:
+            return None
+
         if getattr(dataloader_iterator, "invalidated", False):
             raise RuntimeError(
                 "The dataloader iterator has been invalidated. "
@@ -203,5 +209,8 @@ class ExecutionEngine:
             setattr(dataloader_iterator, "invalidated", True)
             return None
 
-    # TODO (insujang): Implement the following
-    # load_model, save_model, load_optimizer, save_optimizer, load_lr_scheduler, save_lr_scheduler
+    def reconfigure(
+        self, model: nn.Module, optimizer: Optimizer, dataloader: DataLoader
+    ):
+        self.plugin.reconfigure(self.pipeline_templates, model, optimizer, dataloader)
+        self.need_reconfiguration = False

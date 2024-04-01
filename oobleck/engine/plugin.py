@@ -71,7 +71,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
 
     def _instantiate_pipelines(
         self,
-        pipeline_templates: list[PipelineTemplate],
+        pipeline_templates: dict[int, PipelineTemplate],
         global_num_microbatches: int,
         old_pg_mesh: Optional[list] = None,
         old_rank_map: Optional[dict[HostInfo, list[int]]] = None,
@@ -81,7 +81,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
         Each pipeline template may be instantiated several times.
 
         Args:
-            pipeline_templates: List of pipeline templates
+            pipeline_templates: Dict of pipeline templates (num_hosts -> pipeline template)
             global_num_microbatches: Number of microbatches in a global batch
             old_pg_mesh: previous group rank mesh (HeterogeneousProcessGroupMesh.mesh).
                 Necessary for reconfiguration. None if not reconfiguration.

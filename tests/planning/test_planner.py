@@ -38,7 +38,7 @@ def test_error_for_too_large_num_nodes(profile_dir: Path):
 
 
 def test_create_pipeline_templates(profile_dir: Path):
-    templates: list[PipelineTemplate] = planner.create_pipeline_templates(
+    templates: dict[PipelineTemplate] = planner.create_pipeline_templates(
         model_name=model_name,
         job_profile_dir=profile_dir,
         microbatch_size=microbatch_size,
@@ -48,9 +48,10 @@ def test_create_pipeline_templates(profile_dir: Path):
     )
 
     assert len(templates) == 4
-    assert [template.num_stages for template in templates] == [1, 2, 3, 4]
+    assert [template.num_stages for template in templates.values()] == [1, 2, 3, 4]
 
-    for template in templates:
+    for num_stages, template in templates.items():
+        assert num_stages == template.num_stages
         assert modules == list(
             itertools.chain.from_iterable(template.modules_per_stage)
         )

@@ -12,7 +12,7 @@ class PipelineInstantiator:
 
     def __init__(
         self,
-        pipeline_templates: list[PipelineTemplate],
+        pipeline_templates: dict[int, PipelineTemplate],
         global_num_microbatches: int,
     ):
         self.pipeline_templates = pipeline_templates
@@ -171,13 +171,11 @@ class PipelineInstantiator:
             float(global_iteration_time.value()) is not None
         ), "Status is optimal but global_iteration_time is None."
 
+        num_microbatches = {
+            template: int(num_microbatch.value())
+            for template, num_microbatch in num_microbatches.items()
+        }
         logger.debug(
             f"Optiomal batch distribution for {num_templates}: {num_microbatches}"
         )
-        return (
-            float(global_iteration_time.value()),
-            {
-                template: int(num_microbatches[template].value())
-                for template in num_microbatches.keys()
-            },
-        )
+        return (float(global_iteration_time.value()), num_microbatches)
