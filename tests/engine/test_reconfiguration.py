@@ -42,35 +42,6 @@ from .data_builder import GLUEDataBuilder
 
 
 class OobleckReconfigurationClassBase(OobleckMultiprocessTestBase):
-    reconfiguration_count: int = 0
-
-    def init_distributed(self):
-        if dist.is_initialized():
-            dist.destroy_process_group(dist.GroupMember.WORLD)
-
-        configuration_engine = ConfigurationEngine.get_instance()
-        self.rank = configuration_engine.rank
-        self.num_hosts = configuration_engine.world_size // self.tp_size
-
-        print(f"dist init r={self.rank}, world={self.world_size}")
-
-        try:
-            dist.init_process_group(
-                init_method=f"{FILE_SCHEMA}{self.file_name}{self.reconfiguration_count}",
-                backend="nccl",
-                world_size=self.world_size,
-                rank=self.rank,
-            )
-            self.reconfiguration_count += 1
-
-        except RuntimeError as e:
-            if "recompile" in e.args[0]:
-                sys.exit(TEST_SKIPS["backend_unavailable"].exit_code)
-
-            raise
-
-        assert dist.is_initialized()
-
     def prepare(
         self, pipelines: list[PipelineTemplate]
     ) -> tuple[OobleckPlugin, ModelWrapper, OptimizerWrapper, DataLoader]:

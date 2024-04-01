@@ -38,6 +38,8 @@ class OobleckMultiprocessTestBase(MultiProcessTestCase):
 
     backend: str = "nccl"
 
+    reconfiguration_count: int = 0
+
     @property
     def world_size(self) -> int:
         return self.num_hosts * self.tp_size
@@ -86,11 +88,12 @@ class OobleckMultiprocessTestBase(MultiProcessTestCase):
 
         try:
             dist.init_process_group(
-                init_method=f"{FILE_SCHEMA}{self.file_name}",
+                init_method=f"{FILE_SCHEMA}{self.file_name}{self.reconfiguration_count}",
                 backend=self.backend,
                 world_size=self.world_size,
                 rank=self.rank,
             )
+            self.reconfiguration_count += 1
 
         except RuntimeError as e:
             if "recompile" in e.args[0]:
