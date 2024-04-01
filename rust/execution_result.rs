@@ -173,6 +173,16 @@ impl PipelineExecutionResult {
             kstar: 0,
         }
     }
+    pub fn latency_with_mb(&self, mb: u32) -> f64 {
+        // Because latency is determined by the number of microbatches (4*num_stages),
+        // It is not fair to use the latency as it is. Instead, we calculate the latency
+        // with respect to the same number of microbatches.
+        self.t1
+            + self.t2
+            + self.t3
+            + (((mb as i32) - (4 * self.stages.len() as i32)) as f64)
+                * self.stages[self.kstar].latency()
+    }
     pub fn latency(&self) -> f64 {
         self.t1 + self.t2 + self.t3
     }
@@ -194,7 +204,8 @@ impl PipelineExecutionResult {
 
 impl PartialEq for PipelineExecutionResult {
     fn eq(&self, other: &Self) -> bool {
-        self.latency() == other.latency() && self.mem_required() == other.mem_required()
+        self.latency_with_mb(128) == other.latency_with_mb(128)
+            && self.mem_required() == other.mem_required()
     }
 }
 
@@ -205,9 +216,9 @@ impl Ord for PipelineExecutionResult {
         if self == other {
             Ordering::Equal
         } else {
-            if self.latency() < other.latency() {
+            if self.latency_with_mb(128) < other.latency_with_mb(128) {
                 Ordering::Less
-            } else if self.latency() > other.latency() {
+            } else if self.latency_with_mb(128) > other.latency_with_mb(128) {
                 Ordering::Greater
             } else {
                 if self.mem_required() < other.mem_required() {
