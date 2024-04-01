@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import multiprocessing
+import os
 import socket
 import sys
 from argparse import REMAINDER
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from multiprocessing.context import SpawnProcess
 from multiprocessing.synchronize import Condition
 from pathlib import Path
 
@@ -161,10 +163,13 @@ class MultiNodeAgentRunner:
                 logger.debug(f"Connected to {host.ip}:{host.port}. Executing: {cmd}")
 
                 with (
-                    sys.stdout
-                    if debug
-                    else (base_dir / tag / f"agent{agent_index}.log").open("w")
-                ) as out_stream:
+                    (
+                        sys.stdout
+                        if debug
+                        else (base_dir / tag / f"agent{agent_index}.log").open("w")
+                    ) as out_stream,
+                    conn.cd(os.getcwd()),
+                ):
                     conn.run(
                         cmd,
                         hide=True,
@@ -177,14 +182,17 @@ class MultiNodeAgentRunner:
             logger.warning(f"SSH disconnected: {e}")
             disconnect_condition.notify_all()
 
-    def run(self, debug: bool = False):
+        logger.info(f"Agent {agent_index} is done. Exiting...")
+
+    def run(self, debug: bool = False) -> list[SpawnProcess]:
         """
         Spawn multiple processes to run agents on multiple hosts.
         Each process accesses a host via SSH and runs the agent.
         """
         context = multiprocessing.get_context("spawn")
+        processes: list[SpawnProcess] = []
         for agent_index, host in enumerate(self.hosts):
-            context.Process(
+            p = context.Process(
                 target=self.run_on_nodes,
                 args=(
                     agent_index,
@@ -195,7 +203,11 @@ class MultiNodeAgentRunner:
                     self.base_dir,
                     debug,
                 ),
-            ).start()
+            )
+            p.start()
+            processes.append(p)
+
+        return processes
 
 
 class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
@@ -314,11 +326,15 @@ def serve():
     server.start()
     logger.info(f"Running master service on port {port}")
 
-    # runner = MultiNodeAgentRunner(
-    #     disconnect_condition, hostinfo, port, launch_args.tag, launch_args.base_dir
-    # )
-    # runner.run(launch_args.debug)
-    server.wait_for_termination()
+    runner = MultiNodeAgentRunner(
+        disconnect_condition, hostinfo, port, launch_args.tag, launch_args.base_dir
+    )
+    processes = runner.run(launch_args.debug)
+    for p in processes:
+        p.join()
+
+    logger.info("Training is done. Stopping the master service.")
+    server.stop(5)
 
 
 if __name__ == "__main__":
