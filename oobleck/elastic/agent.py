@@ -3,6 +3,7 @@ import os
 import runpy
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.context import SpawnContext, SpawnProcess
@@ -27,6 +28,16 @@ class OobleckAgentArguments:
     agent_index: int
     tag: str
     base_dir: Path
+
+
+@contextmanager
+def temporary_argv(new_argv: list[str]):
+    old_argv = sys.argv[:]
+    sys.argv = new_argv
+    try:
+        yield
+    finally:
+        sys.argv = old_argv
 
 
 @dataclass
@@ -59,20 +70,16 @@ class Worker:
             "worker_main() is called."
         )
 
+        logger.debug(
+            f"Worker process started: (agent_index: {agent_index}, "
+            f"gpu_index: {os.environ['CUDA_VISIBLE_DEVICES']})"
+        )
+
         ConfigurationEngine.create(pipe, agent_index, gpu_index, tag, base_dir)
 
-        # Back up sys.argv and replace it with the given args
-        original_argv = sys.argv.copy()
-        sys.argv = [script_path.name] + script_args
-
-        script_directory = str(script_path.parent)
-        sys.path.insert(0, script_directory)
-
-        runpy.run_path(script_path, run_name="__main__")
-
-        # Restore sys.argv
-        sys.argv = original_argv
-        sys.path.remove(script_directory)
+        argv = [script_path] + script_args
+        with temporary_argv(argv):
+            runpy.run_path(script_path, run_name="__main__")
 
 
 class Agent:
@@ -132,14 +139,14 @@ class Agent:
             (self.agent_index + 1) * tensor_parallel_size,
         )
 
-        env_backup = os.environ.copy()
+        # env_backup = os.environ.copy()
 
         for gpu_index, rank in enumerate(ranks):
             logger.info(f"Launching worker {rank} (GPU: {gpu_index})...")
 
             pipe, child_pipe = ctx.Pipe()
 
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+            # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
             process: SpawnProcess = ctx.Process(
                 target=Worker.worker_main,
                 args=(
@@ -157,7 +164,7 @@ class Agent:
             self.workers.append(Worker(pipe, process))
             pipe.send(self.dist_info)
 
-        os.environ = env_backup
+        # os.environ = env_backup
 
         # If this is the first agent, it should forward the master rank port
         if self.agent_index == 0:

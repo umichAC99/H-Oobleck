@@ -83,21 +83,25 @@ class PipelineInstantiator:
             f"Enumerating all feasible sets of pipeline templates for {num_nodes} nodes."
         )
 
+        pipeline_templates: list[PipelineTemplate] = list(
+            self.pipeline_templates.values()
+        )
+
         dp: list[list[list[dict[PipelineTemplate, int]]]] = [
             [[] for _ in range(num_nodes + 1)]
             for _ in range(len(self.pipeline_templates) + 1)
         ]
 
-        for i in range(1, len(self.pipeline_templates) + 1):
+        for i in range(1, len(pipeline_templates) + 1):
             dp[i][0] = [defaultdict(int)]
             for j in range(1, num_nodes + 1):
                 # (1) in Figure: copy all dicts
                 dp[i][j] = [combo.copy() for combo in dp[i - 1][j]]
-                if self.pipeline_templates[i - 1].num_stages <= j:
+                if pipeline_templates[i - 1].num_stages <= j:
                     # (2) in Figure: copy all dicts with one pipeline_templates[i - 1] added
-                    for combo in dp[i][j - self.pipeline_templates[i - 1].num_stages]:
+                    for combo in dp[i][j - pipeline_templates[i - 1].num_stages]:
                         new_combo = combo.copy()
-                        new_combo[self.pipeline_templates[i - 1]] += 1
+                        new_combo[pipeline_templates[i - 1]] += 1
 
                         # concatenate two lists
                         dp[i][j].append(new_combo)
@@ -156,9 +160,8 @@ class PipelineInstantiator:
             == self.global_num_microbatches
         )
         for template in num_microbatches.keys():
-            model += (
-                global_iteration_time * template.num_stages
-                >= template.latency * num_microbatches[template]
+            model += global_iteration_time * template.num_stages >= template.latency(
+                num_microbatches[template]
             )
 
         # define objective function

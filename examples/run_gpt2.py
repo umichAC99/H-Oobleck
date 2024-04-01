@@ -1,46 +1,35 @@
-from oobleck import ExecutionEngine
-from oobleck_colossalai import HeterogeneousParallelPlugin
-
-from tqdm import tqdm
-
-from dataclasses import dataclass
 import simple_parsing
-
+from data_builder import GLUEDataBuilder
+from run_singlenode import TrainingArguments
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
-
+from tqdm import tqdm
 from transformers import (
     AutoConfig,
-    PretrainedConfig,
     GPT2ForSequenceClassification,
+    PretrainedConfig,
     get_linear_schedule_with_warmup,
 )
 
-from data_builder import GLUEDataBuilder
-
-
-@dataclass
-class ExampleArguments:
-    model_name_or_path: str = "gpt2"
-    global_batch_size: int = 32
-    num_epoch: int = 3
-    warmup_faction: float = 0.1
+from oobleck import ExecutionEngine, OobleckPlugin
 
 
 def main():
-    args: ExampleArguments = simple_parsing.parse(ExampleArguments)
+    args: TrainingArguments = simple_parsing.parse(TrainingArguments)
 
-    plugin = HeterogeneousParallelPlugin(
-        tp_size=4,
+    plugin = OobleckPlugin(
+        tp_size=args.tp_size,
         global_batch_size=args.global_batch_size,
-        microbatch_size=1,
+        microbatch_size=8,
         precision="bf16",
         enable_fused_normalization=True,
         enable_flash_attention=True,
     )
+
     engine = ExecutionEngine(plugin)
 
     config: PretrainedConfig = AutoConfig.from_pretrained(args.model_name_or_path)
+    config.pad_token_id = config.eos_token_id
     model = GPT2ForSequenceClassification.from_pretrained(
         args.model_name_or_path, config=config
     )
@@ -61,7 +50,7 @@ def main():
         num_training_steps=total_steps,
     )
 
-    model, optimizer, _criterion, _, lr_scheduler = engine.prepare(
+    model, optimizer, _, _, lr_scheduler = engine.prepare(
         model,
         criterion=lambda outputs, inputs: outputs.loss,
         dataloader=dataloader,
@@ -77,8 +66,10 @@ def main():
     is_pp_last_stage = engine.plugin.stage_manager.is_last_stage()
 
     for epoch in range(args.num_epoch):
+        total_step = len(dataloader)
+        dataloader_iter = iter(dataloader)
         with tqdm(
-            range(total_steps),
+            range(total_step),
             desc=f"Epoch [{epoch + 1}/{args.num_epoch}]",
             disable=not (engine.is_master or is_pp_last_stage),
         ) as pbar:
@@ -91,6 +82,11 @@ def main():
                     return_loss=True,
                     return_outputs=True,
                 )
+
+                if outputs is None:
+                    # Reconfiguration due to failure is done.
+                    dataloader_iter = iter(dataloader)
+                    continue
 
                 if is_pp_last_stage:
                     loss = outputs["loss"]
