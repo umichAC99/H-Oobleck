@@ -1,5 +1,6 @@
 import itertools
 import math
+from threading import Thread
 from typing import Any, Callable, Iterator
 
 import torch
@@ -45,6 +46,8 @@ class ExecutionEngine:
         self.booster: Booster | None = None
         self.booster_kwargs = booster_kwargs
 
+        self.notification_receiver_thread: Thread | None = None
+
     @property
     def is_master(self) -> bool:
         configuration_engine = ConfigurationEngine.get_instance()
@@ -81,8 +84,8 @@ class ExecutionEngine:
         profiler = ModelProfiler(
             configuration_engine.tag,
             model_name_or_path=_fullname(model),
-            optimize_class=_fullname(optimizer),
-            model_config=model.config,
+            optimizer_class=_fullname(optimizer),
+            config=model.config,
             precision=self.plugin.precision,
             tp_size=self.plugin.tp_size,
             base_dir=configuration_engine.base_dir,
@@ -108,9 +111,11 @@ class ExecutionEngine:
         logger.debug("Creating pipeline templates...")
         self.pipeline_templates = create_pipeline_templates(
             _fullname(model),
-            self.plugin.microbatch_size,
-            list(range(min_num_nodes, max_num_nodes + 1)),
             configuration_engine.base_dir / configuration_engine.tag / "profile",
+            self.plugin.microbatch_size,
+            self.plugin.tp_size,
+            self.plugin.precision,
+            list(range(min_num_nodes, max_num_nodes + 1)),
         )
 
         logger.debug(f"Pipeline templates: {self.pipeline_templates}")
@@ -140,6 +145,21 @@ class ExecutionEngine:
         # TODO: implement it
         pass
 
+    def notification_receive_func(self):
+        logger.info("Start failure notification watcher.")
+        configuration_engine = ConfigurationEngine.get_instance()
+        configuration_engine.recv_reconfiguration_notification()
+        self.on_receive_reconfiguration_notifiation()
+
+    def on_receive_reconfiguration_notifiation(self):
+        """
+        A failure event is received from any worker.
+        The reconfiguration engine should reconfigure affected pipelines
+        using the set of pipeline templates.
+        This function is called in such a case.
+        """
+        dist.destroy_process_group(dist.GroupMember.WORLD)
+
     def execute(
         self,
         dataloader_iterator: Iterator,
@@ -148,15 +168,40 @@ class ExecutionEngine:
         optimizer: Optimizer,
         return_loss: bool = True,
         return_outputs: bool = False,
-    ) -> dict[str, Any]:
-        return self.booster.execute_pipeline(
-            dataloader_iterator,
-            model,
-            criterion,
-            optimizer,
-            return_loss=return_loss,
-            return_outputs=return_outputs,
-        )
+    ) -> dict[str, Any] | None:
+        if getattr(dataloader_iterator, "invalidated", False):
+            raise RuntimeError(
+                "The dataloader iterator has been invalidated. "
+                "Please recreate the iterator before resuming training."
+            )
+
+        if (
+            self.notification_receiver_thread is None
+            or not self.notification_receiver_thread.is_alive()
+        ):
+            self.notification_receiver_thread = Thread(
+                target=self.notification_receive_func,
+                name="failure_notification_watcher",
+                daemon=True,
+            )
+            self.notification_receiver_thread.start()
+
+        try:
+            return self.booster.execute_pipeline(
+                dataloader_iterator,
+                model,
+                criterion,
+                optimizer,
+                return_loss=return_loss,
+                return_outputs=return_outputs,
+            )
+        except ValueError as e:
+            if not str(e).startswith("Default process group"):
+                raise
+
+            # Failure happens and WORLD process group has been destroyed.
+            setattr(dataloader_iterator, "invalidated", True)
+            return None
 
     # TODO (insujang): Implement the following
     # load_model, save_model, load_optimizer, save_optimizer, load_lr_scheduler, save_lr_scheduler

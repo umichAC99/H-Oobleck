@@ -114,6 +114,10 @@ class ConfigurationEngine:
         """
         return self.agent_index == 0 and self.local_rank == 0
 
+    def recv_reconfiguration_notification(self):
+        message = self.pipe.recv()
+        assert message == "reconfigure"
+
     def send_distributed_port(self, port: int):
         self.pipe.send(port)
 
@@ -166,7 +170,7 @@ class ConfigurationEngine:
         )
 
         dist.init_process_group(
-            backend="cuda",
+            backend="nccl",
             store=store,
             rank=self.rank,
             world_size=self.world_size,

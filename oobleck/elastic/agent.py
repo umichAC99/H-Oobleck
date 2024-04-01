@@ -106,6 +106,7 @@ class Agent:
 
     def notify_reconfiguration_to_workers(self, dist_info: list[HostInfo]):
         for worker in self.workers:
+            worker.pipe.send("reconfigure")
             worker.pipe.send(dist_info)
 
     def watch_reconfiguration_notification(self):

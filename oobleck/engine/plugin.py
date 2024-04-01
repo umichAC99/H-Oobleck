@@ -69,15 +69,6 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
 
         self.global_batch_size = global_batch_size
 
-    def on_receive_reconfiguration_notification(self):
-        """
-        A failure event is received from any worker.
-        The reconfiguration engine should reconfigure affected pipelines
-        using the set of pipeline templates.
-        This function is called in such a case.
-        """
-        pass
-
     def _instantiate_pipelines(
         self,
         pipeline_templates: list[PipelineTemplate],
