@@ -51,6 +51,12 @@ class PipelineInstantiator:
                 f"Failed to find optimal batch distribution for {num_nodes} nodes."
             )
 
+        str = "Batch distributions===============\n"
+        for latency, dist in batch_distributions:
+            str += f"  {dist} (latency {latency} ms)\n"
+        str + "=================================="
+        logger.debug(str)
+
         # Find the second dictionary where its corresponding float is the minimum
         optimal_distribution = min(
             (dist for dist in batch_distributions if dist is not None),
@@ -58,7 +64,7 @@ class PipelineInstantiator:
         )
         index = batch_distributions.index(optimal_distribution)
 
-        logger.debug(f"Optimal batch distribution: {optimal_distribution[1]}")
+        logger.info(f"Optimal batch distribution: {optimal_distribution[1]}")
 
         return (
             instantiations_options[index],
@@ -160,7 +166,7 @@ class PipelineInstantiator:
             == self.global_num_microbatches
         )
         for template in num_microbatches.keys():
-            model += global_iteration_time * template.num_stages >= template.latency(
+            model += global_iteration_time >= template.latency(
                 num_microbatches[template]
             )
 

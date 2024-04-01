@@ -64,7 +64,7 @@ fn create_pipeline_templates(
                         model_name.as_str(),
                         result.get_modules_per_stage(&generator.layer_execution_results),
                         result.latency(),
-                        result.kstar,
+                        result.stages[result.kstar].latency(),
                         result.mem_required(),
                     ),
                 )?
