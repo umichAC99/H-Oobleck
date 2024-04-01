@@ -1,6 +1,3 @@
-import csv
-from pathlib import Path
-
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 
 # pylint: disable=unused-argument

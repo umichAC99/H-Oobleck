@@ -1,10 +1,12 @@
-import csv
+import json
 from pathlib import Path
 
 from oobleck_colossalai.shardformer.policies.gpt2 import (
     GPT2Config,
     GPT2ForSequenceClassificationPolicy,
 )
+
+from oobleck.planning.profiler import JsonEncoder, LayerExecutionResult, ModelProfiler
 
 from .engine.data_builder import GLUEDataBuilder
 
@@ -20,27 +22,28 @@ model_name: str = "transformers.models.gpt2.modeling_gpt2.GPT2ForSequenceClassif
 tag: str = "test-gpt2"
 
 
-def init_profile_data(file_path: Path):
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    with file_path.open("w") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "layer_index",
-                "layer_name",
-                "forward",
-                "backward",
-                "mem_required",
-            ],
-        )
-        writer.writeheader()
-        for index, layer_name in enumerate(modules):
-            writer.writerow(
-                {
-                    "layer_index": index,
-                    "layer_name": layer_name,
-                    "forward": 1.0,
-                    "backward": 1.0,
-                    "mem_required": 10,
-                }
+def init_profile_data(
+    profile_dir: Path, tp_size: int, microbatch_size: int, precision: str
+):
+    data = {
+        "model_name": model_name,
+        "microbatch_size": microbatch_size,
+        "tp_size": tp_size,
+        "precision": precision,
+        "layers": [
+            LayerExecutionResult(
+                layer_index=index,
+                layer_name=layer_name,
+                forward=1.0,
+                backward=1.0,
+                mem_required=10,
             )
+            for index, layer_name in enumerate(modules)
+        ],
+    }
+
+    profile_path = ModelProfiler.get_profile_path(
+        profile_dir, tp_size, microbatch_size, precision
+    )
+    with profile_path.open("w") as f:
+        json.dump(data, f, cls=JsonEncoder)

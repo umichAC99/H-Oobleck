@@ -1,5 +1,6 @@
 import functools
 import importlib
+import json
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from functools import reduce
@@ -8,7 +9,6 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import yaml
 from colossalai.accelerator import get_accelerator
 from colossalai.amp.naive_amp.mixed_precision_optimizer import MixedPrecisionOptimizer
 from colossalai.booster.plugin.hybrid_parallel_plugin import get_param_info
@@ -29,6 +29,13 @@ class LayerExecutionResult:
     forward: float
     backward: float
     mem_required: int
+
+
+class JsonEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, LayerExecutionResult):
+            return asdict(obj)
+        return super().default(obj)
 
 
 class ModelProfiler:
@@ -60,13 +67,13 @@ class ModelProfiler:
         self.model_config = config
         self.tp_size = tp_size
         self.profile_dir = base_dir / tag / "profile"
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def get_profile_path(
         profile_dir: Path, tp_size: int, microbatch_size: int, precision: str
     ) -> Path:
-        return profile_dir / f"profile_tp{tp_size}_mb{microbatch_size}_{precision}.yaml"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        return profile_dir / f"profile_tp{tp_size}_mb{microbatch_size}_{precision}.json"
 
     def init_profile(self, inputs: dict[str, torch.Tensor]):
         """Profile the model with a new child process.
@@ -134,7 +141,7 @@ class ModelProfiler:
         dist.broadcast(data_tensor, src=0)
         torch.cuda.synchronize()
 
-        data = yaml.safe_load(data_tensor.cpu().numpy().tobytes())
+        data = json.loads(data_tensor.cpu().numpy().tobytes())
         return [
             LayerExecutionResult(
                 layer_index=layer["layer_index"],
@@ -369,7 +376,6 @@ class ModelProfiler:
 
             data = {
                 "model_name": model_name_or_path,
-                "model_config": model_config.to_dict(),
                 "microbatch_size": microbatch_size,
                 "tp_size": tp_size,
                 "precision": precision,
@@ -408,7 +414,7 @@ class ModelProfiler:
                 )
 
             with profile_path.open("w") as f:
-                yaml.safe_dump(data, f)
+                json.dump(data, f, cls=JsonEncoder)
 
         dist.barrier()
         torch.cuda.synchronize()

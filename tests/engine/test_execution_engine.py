@@ -99,7 +99,10 @@ class TestExecutionEngineClass(MultiProcessTestCase):
         temp_dir = TemporaryDirectory()
         self.init_configuration_engine(Path(temp_dir.name))
         init_profile_data(
-            Path(temp_dir.name) / tag / "profile" / f"mb_{self.microbatch_size}.csv"
+            Path(temp_dir.name) / tag / "profile",
+            tp_size=2,
+            microbatch_size=self.microbatch_size,
+            precision="fp32",
         )
 
         plugin = self.get_plugin()
@@ -172,7 +175,10 @@ class TestExecutionEngineClass(MultiProcessTestCase):
         temp_dir = TemporaryDirectory()
         self.init_configuration_engine(Path(temp_dir.name))
         init_profile_data(
-            Path(temp_dir.name) / tag / "profile" / f"mb_{self.microbatch_size}.csv"
+            Path(temp_dir.name) / tag / "profile",
+            tp_size=2,
+            microbatch_size=self.microbatch_size,
+            precision="fp32",
         )
 
         plugin = self.get_plugin()

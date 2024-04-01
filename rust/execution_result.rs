@@ -1,10 +1,37 @@
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::clone::Clone;
 use std::cmp::{Ordering, PartialEq};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use csv;
-use std::path::PathBuf;
+#[derive(Serialize, Deserialize)]
+pub struct ProfileResult {
+    model_name: String,
+    microbatch_size: u32,
+    tp_size: u32,
+    precision: String,
+    layers: Vec<LayerExecutionResult>,
+}
+
+impl ProfileResult {
+    pub fn new(
+        model_name: String,
+        microbatch_size: u32,
+        tp_size: u32,
+        precision: String,
+        layers: Vec<LayerExecutionResult>,
+    ) -> Self {
+        ProfileResult {
+            model_name,
+            microbatch_size,
+            tp_size,
+            precision,
+            layers,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct LayerExecutionResult {
@@ -33,21 +60,32 @@ impl LayerExecutionResult {
     }
 
     pub fn get_profile_results(
-        microbatch_size: u32,
         job_profile_dir: PathBuf,
+        microbatch_size: u32,
+        tp_size: u32,
+        precision: String,
     ) -> Result<Vec<LayerExecutionResult>, std::io::Error> {
-        let path =
-            job_profile_dir.join("mb_".to_string() + microbatch_size.to_string().as_str() + ".csv");
-        let mut reader = csv::Reader::from_path(path)?;
+        let path = job_profile_dir.join(
+            "profile_tp".to_string()
+                + tp_size.to_string().as_str()
+                + "_mb"
+                + microbatch_size.to_string().as_str()
+                + "_".to_string().as_str()
+                + precision.as_str()
+                + ".json",
+        );
+        let data = match fs::read_to_string(path) {
+            Ok(data) => data,
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "File not found",
+                ))
+            }
+        };
 
-        let mut data: Vec<LayerExecutionResult> = Vec::new();
-        for result in reader.deserialize() {
-            let record: LayerExecutionResult = result?;
-            data.push(record);
-        }
-        drop(reader);
-
-        Ok(data)
+        let data: ProfileResult = serde_json::from_str(&data).unwrap();
+        Ok(data.layers)
     }
 }
 

@@ -1,3 +1,4 @@
+import json
 import multiprocessing
 import os
 import shutil
@@ -5,7 +6,6 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-import yaml
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     cleanup_temp_dir,
@@ -127,7 +127,7 @@ class TestProfileModelClass(MultiProcessTestCase):
         )
 
         assert profile_path.exists()
-        data = yaml.safe_load(profile_path.read_text())
+        data = json.loads(profile_path.read_text())
         assert data["precision"] == precision
         assert data["tp_size"] == self.world_size
         assert data["model_name"] == model_name
