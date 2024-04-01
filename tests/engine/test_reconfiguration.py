@@ -1,24 +1,21 @@
 import json
+import os
 import sys
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
 import torch
 import torch.distributed as dist
-from colossalai.accelerator import get_accelerator
 from colossalai.checkpoint_io.utils import save_state_dict_shards
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 from torch.optim import Adam
 from torch.testing._internal.common_distributed import (
-    TEST_SKIPS,
     requires_nccl,
     skip_if_lt_x_gpu,
 )
 from torch.testing._internal.common_utils import (
-    FILE_SCHEMA,
     instantiate_parametrized_tests,
     parametrize,
 )
@@ -293,18 +290,7 @@ class TestOobleckReconfiguration4RanksClass(OobleckReconfigurationClassBase):
         ]
 
         configuration_engine = ConfigurationEngine.get_instance()
-
-        temp_dir = [
-            (
-                Path(TemporaryDirectory().name).as_posix()
-                if dist.get_rank() == 0
-                else None
-            )
-        ]
-        dist.broadcast_object_list(
-            temp_dir, src=0, device=get_accelerator().get_current_device()
-        )
-        temp_dir = Path(temp_dir[0])
+        temp_dir = Path(os.environ["TEMP_DIR"])
 
         with patch(
             "colossalai.checkpoint_io.hybrid_parallel_checkpoint_io.save_state_dict_shards",

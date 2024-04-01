@@ -1,8 +1,8 @@
 import multiprocessing
+import os
 import sys
 from multiprocessing.connection import Connection
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import torch
 import torch.distributed as dist
@@ -10,6 +10,8 @@ from oobleck_colossalai.pipeline_template import PipelineTemplate
 from torch.testing._internal.common_distributed import (
     TEST_SKIPS,
     MultiProcessTestCase,
+    cleanup_temp_dir,
+    initialize_temp_directories,
 )
 from torch.testing._internal.common_utils import (
     FILE_SCHEMA,
@@ -46,11 +48,13 @@ class OobleckMultiprocessTestBase(MultiProcessTestCase):
 
     def setUp(self):
         super().setUp()
+        initialize_temp_directories()
         self._spawn_processes()
 
     def tearDown(self):
-        super().tearDown()
+        cleanup_temp_dir()
         ConfigurationEngine._instance = None
+        super().tearDown()
 
     def init_oobleck(self):
         if self.backend == "nccl":
@@ -66,8 +70,7 @@ class OobleckMultiprocessTestBase(MultiProcessTestCase):
         )
         self.pipe = pipe
 
-        temp_dir = Path(TemporaryDirectory().name)
-
+        temp_dir = Path(os.environ["TEMP_DIR"])
         ConfigurationEngine.create(
             child_pipe,
             self.rank // self.tp_size,
