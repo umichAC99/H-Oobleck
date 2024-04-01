@@ -56,19 +56,20 @@ fn create_pipeline_templates(
         let class = module.getattr("PipelineTemplate")?.into_py(py);
 
         for num_node in num_nodes {
-            let template = generator.get_pipeline_template(num_node).unwrap();
+            let result = generator.get_pipeline_template(num_node).unwrap();
             let py_template = class
                 .call1(
                     py,
                     (
                         model_name.as_str(),
-                        template.get_modules_per_stage(&generator.layer_execution_results),
-                        template.latency(),
-                        template.mem_required(),
+                        result.get_modules_per_stage(&generator.layer_execution_results),
+                        result.latency(),
+                        result.kstar,
+                        result.mem_required(),
                     ),
                 )?
                 .to_object(py);
-            results.set_item(template.stages.len(), py_template)?;
+            results.set_item(result.stages.len(), py_template)?;
         }
 
         Ok(results.into())
