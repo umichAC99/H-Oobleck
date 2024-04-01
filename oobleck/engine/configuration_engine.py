@@ -116,7 +116,9 @@ class ConfigurationEngine:
 
     def recv_reconfiguration_notification(self):
         message = self.pipe.recv()
-        assert message == "reconfigure"
+        assert (
+            message == "reconfigure"
+        ), f"Unexpected reconfiguration message: {message}"
 
     def send_distributed_port(self, port: int):
         self.pipe.send(port)

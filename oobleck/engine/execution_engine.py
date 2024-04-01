@@ -1,5 +1,6 @@
 import itertools
 import math
+from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 from typing import Any, Callable, Iterator
 
@@ -10,6 +11,7 @@ from colossalai.booster import Booster
 from colossalai.shardformer.policies.auto_policy import _fullname
 from loguru import logger
 from oobleck_colossalai.pipeline_template import PipelineTemplate
+from torch.distributed import distributed_c10d
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 from torch.utils.data import DataLoader
@@ -150,8 +152,8 @@ class ExecutionEngine:
         logger.info("Start failure notification watcher.")
         configuration_engine = ConfigurationEngine.get_instance()
         configuration_engine.recv_reconfiguration_notification()
-        self.on_receive_reconfiguration_notifiation()
         self.need_reconfiguration = True
+        self.on_receive_reconfiguration_notifiation()
         logger.info("Failure watcher received notification and terminated.")
 
     def on_receive_reconfiguration_notifiation(self):
@@ -161,7 +163,19 @@ class ExecutionEngine:
         using the set of pipeline templates.
         This function is called in such a case.
         """
-        dist.destroy_process_group(dist.GroupMember.WORLD)
+        all_process_groups = [dist.GroupMember.WORLD] + list(
+            distributed_c10d._pg_map.values()
+        )
+
+        def destroy_pg(pg: dist.ProcessGroup):
+            try:
+                dist.destroy_process_group(pg)
+            except Exception:
+                pass
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            executor.map(lambda pg: destroy_pg(pg), all_process_groups)
+            executor.shutdown(wait=True)
 
     def execute(
         self,
@@ -173,6 +187,8 @@ class ExecutionEngine:
         return_outputs: bool = False,
     ) -> dict[str, Any] | None:
         if self.need_reconfiguration:
+            while self.notification_receiver_thread.is_alive():
+                logger.info("Waiting for removing old torch.distributed to finish.")
             return None
 
         if getattr(dataloader_iterator, "invalidated", False):
@@ -211,6 +227,9 @@ class ExecutionEngine:
 
     def reconfigure(
         self, model: nn.Module, optimizer: Optimizer, dataloader: DataLoader
-    ):
-        self.plugin.reconfigure(self.pipeline_templates, model, optimizer, dataloader)
+    ) -> tuple[nn.Module, Optimizer, DataLoader]:
+        model, optimizer, dataloader, _ = self.plugin.reconfigure(
+            self.pipeline_templates, model, optimizer, dataloader
+        )
         self.need_reconfiguration = False
+        return model, optimizer, dataloader

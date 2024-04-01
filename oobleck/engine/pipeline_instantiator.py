@@ -110,7 +110,9 @@ class PipelineInstantiator:
         return dp[-1][-1]
 
     def distribute_batch(
-        self, num_templates: dict[PipelineTemplate, int]
+        self,
+        num_pipelines: dict[PipelineTemplate, int],
+        need_all_pipelines_have_batch: bool = False,
     ) -> tuple[float, dict[PipelineTemplate, int]] | None:
         """Find the optimal distribution of microbatches that minimizes iteration time.
         Implementation of Section 4.2.2.
@@ -121,7 +123,7 @@ class PipelineInstantiator:
 
         Args:
             global_num_microbatch (int): The total number of microbatches.
-            num_templates (dict[PipelineTemplate, int]): A set of pipeline templates,
+            num_pipelines (dict[PipelineTemplate, int]): A set of pipeline templates,
                 where each value represents the number of pipelines to be instantiated.
 
         Returns:
@@ -139,8 +141,8 @@ class PipelineInstantiator:
         # define variables
         num_microbatches = pulp.LpVariable.dicts(
             "num_microbatches",
-            num_templates.keys(),
-            lowBound=0,
+            num_pipelines.keys(),
+            lowBound=1 if need_all_pipelines_have_batch else 0,
             cat=pulp.LpInteger,
         )
         global_iteration_time = pulp.LpVariable("Z", lowBound=0, cat=pulp.LpContinuous)
@@ -148,7 +150,7 @@ class PipelineInstantiator:
         # define constraints
         model += (
             sum(
-                num_microbatches[template] * num_templates[template]
+                num_microbatches[template] * num_pipelines[template]
                 for template in num_microbatches
             )
             == self.global_num_microbatches
@@ -164,7 +166,7 @@ class PipelineInstantiator:
         model.solve(pulp.PULP_CBC_CMD(msg=False))
 
         if pulp.LpStatus[model.status] != "Optimal":
-            logger.warning(f"Failed to find optimal solution for {num_templates}.")
+            logger.warning(f"Failed to find optimal solution for {num_pipelines}.")
             return None
 
         assert (
@@ -176,6 +178,6 @@ class PipelineInstantiator:
             for template, num_microbatch in num_microbatches.items()
         }
         logger.debug(
-            f"Optiomal batch distribution for {num_templates}: {num_microbatches}"
+            f"Optiomal batch distribution for {num_pipelines}: {num_microbatches}"
         )
         return (float(global_iteration_time.value()), num_microbatches)

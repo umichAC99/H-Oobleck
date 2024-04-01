@@ -126,7 +126,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
             ]
 
             _, num_microbatches = pipeline_instantiator.distribute_batch(
-                dict(Counter(pipelines))
+                dict(Counter(pipelines)), need_all_pipelines_have_batch=True
             )
         else:
             num_instances, num_microbatches = pipeline_instantiator.instantiate(

@@ -1,4 +1,5 @@
 import sys
+import time
 from typing import Counter
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from oobleck_colossalai import (
 )
 from torch.optim import Adam
 from torch.testing._internal.common_distributed import (
+    requires_gloo,
     requires_nccl,
     skip_if_lt_x_gpu,
 )
@@ -29,6 +31,7 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
+from oobleck.elastic.run import HostInfo
 from oobleck.engine.configuration_engine import ConfigurationEngine
 from oobleck.engine.execution_engine import ExecutionEngine
 from oobleck.engine.plugin import OobleckPlugin
@@ -57,7 +60,7 @@ class OobleckEngineTestBase(OobleckMultiprocessTestBase):
             "fp32",
         )
 
-        templates = [template_1stage, template_2stages, template_3stages]
+        templates = {1: template_1stage, 2: template_2stages, 3: template_3stages}
         plugin = OobleckPlugin(
             tp_size=self.tp_size,
             global_batch_size=self.global_batch_size,
@@ -97,8 +100,8 @@ class OobleckEngineTestBase(OobleckMultiprocessTestBase):
         model: ModelWrapper,
         optimizer: OptimizerWrapper,
         dataloader: DataLoader,
-    ):
-        engine.execute(
+    ) -> dict | None:
+        result = engine.execute(
             iter(dataloader),
             model,
             lambda outputs, inputs: outputs.loss,
@@ -107,8 +110,11 @@ class OobleckEngineTestBase(OobleckMultiprocessTestBase):
             return_outputs=True,
         )
 
-        optimizer.step()
-        optimizer.zero_grad()
+        if result is not None:
+            optimizer.step()
+            optimizer.zero_grad()
+
+        return result
 
 
 class TestEngineExecutionClass(OobleckEngineTestBase):
@@ -119,8 +125,10 @@ class TestEngineExecutionClass(OobleckEngineTestBase):
     @requires_nccl()
     @skip_if_lt_x_gpu(4)
     def test_engine_execute(self, num_hosts: int, tp_size: int):
-        self.num_hosts = num_hosts
-        self.tp_size = tp_size
+        num_hosts_mock = patch.object(self, "num_hosts", num_hosts)
+        tp_size_mock = patch.object(self, "tp_size", tp_size)
+        num_hosts_mock.start()
+        tp_size_mock.start()
 
         if self.rank >= self.world_size:
             sys.exit(0)
@@ -154,6 +162,140 @@ class TestEngineExecutionClass(OobleckEngineTestBase):
         assert forward_mock.call_count == num_microbatches
         assert backward_mock.call_count == num_microbatches
 
+        num_hosts_mock.stop()
+        tp_size_mock.stop()
+
+    @parametrize(
+        "num_hosts, tp_size, pipelines, hosts_to_fail, expected_new_pipelines",
+        [
+            (
+                2,
+                1,
+                [template_1stage, template_1stage],
+                [1235],
+                [template_1stage],
+            ),
+            (
+                3,
+                1,
+                [template_1stage, template_2stages],
+                [1235],
+                [template_1stage, template_1stage],
+            ),
+            (
+                3,
+                1,
+                [template_1stage, template_2stages],
+                [1236],
+                [template_1stage, template_1stage],
+            ),
+            (
+                4,
+                1,
+                [template_2stages, template_2stages],
+                [1235],
+                [template_1stage, template_2stages],
+            ),
+            (
+                4,
+                1,
+                [template_2stages, template_2stages],
+                [1236],
+                [template_2stages, template_1stage],
+            ),
+        ],
+    )
+    @requires_nccl()
+    @skip_if_lt_x_gpu(4)
+    def test_engine_reconfigure(
+        self,
+        num_hosts: int,
+        tp_size: int,
+        pipelines: list[PipelineTemplate],
+        hosts_to_fail: list[int],
+        expected_new_pipelines: list[PipelineTemplate],
+    ):
+        num_hosts_mock = patch.object(self, "num_hosts", num_hosts)
+        tp_size_mock = patch.object(self, "tp_size", tp_size)
+        num_hosts_mock.start()
+        tp_size_mock.start()
+
+        if self.rank >= self.world_size:
+            sys.exit(0)
+
+        with patch(
+            "oobleck.engine.execution_engine.PipelineInstantiator.instantiate",
+            return_value=(
+                dict(Counter(pipelines)),
+                {
+                    template: self.global_batch_size // len(pipelines)
+                    for template in pipelines
+                },
+            ),
+        ):
+            engine, model, optimizer, dataloader = self.prepare()
+
+        self.do_step(engine, model, optimizer, dataloader)
+        dist.barrier()
+        torch.cuda.synchronize()
+
+        assert engine.notification_receiver_thread.is_alive()
+
+        configuration_engine = ConfigurationEngine.get_instance()
+
+        if (
+            configuration_engine.dist_info[configuration_engine.agent_index].port
+            in hosts_to_fail
+        ):
+            print(f"Failing the host {configuration_engine.agent_index}...")
+            sys.exit(0)
+        else:
+            new_host_info: list[HostInfo] = [
+                host_info
+                for host_info in configuration_engine.dist_info
+                if host_info.port not in hosts_to_fail
+            ]
+
+            self.pipe.send("reconfigure")
+            self.pipe.send(new_host_info)
+
+        while engine.notification_receiver_thread.is_alive():
+            print("Waiting for the notification receiver thread to terminate...")
+            time.sleep(1)
+
+        # After thread is terminated, the engine should be reconfigured
+        assert not dist.is_initialized()
+        assert engine.need_reconfiguration is True
+        assert self.do_step(engine, model, optimizer, dataloader) is None
+
+        with (
+            patch.object(
+                configuration_engine, "init_distributed", new=self.init_distributed
+            ),
+            patch(
+                "oobleck.engine.plugin.PipelineInstantiator.distribute_batch",
+                return_value=(
+                    0.0,
+                    {
+                        template: self.global_batch_size // len(expected_new_pipelines)
+                        for template in expected_new_pipelines
+                    },
+                ),
+            ),
+        ):
+            model, optimizer, dataloader = engine.reconfigure(
+                model, optimizer, dataloader
+            )
+
+        assert dist.is_initialized()
+        assert engine.need_reconfiguration is False
+        assert engine.plugin.pipelines == expected_new_pipelines
+        assert self.do_step(engine, model, optimizer, dataloader) is not None
+
+        torch.cuda.synchronize()
+        num_hosts_mock.stop()
+        tp_size_mock.stop()
+
 
 class TestEnginePrepareClass(OobleckEngineTestBase):
     backend: str = "gloo"
@@ -170,6 +312,7 @@ class TestEnginePrepareClass(OobleckEngineTestBase):
         if len(pipelines) == 3
         else "heterogeneous",
     )
+    @requires_gloo()
     def test_engine_prepare(self, pipelines: list[PipelineTemplate]):
         with patch(
             "oobleck.engine.execution_engine.PipelineInstantiator.instantiate",
