@@ -86,8 +86,6 @@ class OobleckReconfigurationClassBase(MultiProcessTestCase):
             temp_dir,
         )
 
-        # init_profile_data(temp_dir / tag / "profile" / f"mb_{microbatch_size}.csv")
-
         # Consume port info that is sent from agent process
         assert ConfigurationEngine.get_instance().receive_distributed_port() == 1234
         self.init_distributed()
