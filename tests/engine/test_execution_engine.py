@@ -1,89 +1,164 @@
-import multiprocessing
-import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
+import sys
 from typing import Counter
 from unittest.mock import patch
 
+import torch
 import torch.distributed as dist
 from colossalai.booster.plugin.hybrid_parallel_plugin import (
     HybridParallelAMPOptimizer,
     HybridParallelNaiveOptimizer,
 )
+from colossalai.interface import ModelWrapper, OptimizerWrapper
 from oobleck_colossalai import (
     HeterogeneousDataLoader,
     HeterogeneousParallelModule,
     PipelineTemplate,
 )
 from torch.optim import Adam
-from torch.testing._internal.common_distributed import MultiProcessTestCase
+from torch.testing._internal.common_distributed import (
+    requires_nccl,
+    skip_if_lt_x_gpu,
+)
 from torch.testing._internal.common_utils import (
-    FILE_SCHEMA,
     instantiate_parametrized_tests,
     parametrize,
 )
+from torch.utils.data import DataLoader
 from transformers import (
     GPT2ForSequenceClassification,
     get_linear_schedule_with_warmup,
 )
 
-from oobleck.elastic.run import HostInfo
 from oobleck.engine.configuration_engine import ConfigurationEngine
 from oobleck.engine.execution_engine import ExecutionEngine
 from oobleck.engine.plugin import OobleckPlugin
 
 from ..conftest import config, init_profile_data, tag
 from .conftest import (
+    OobleckMultiprocessTestBase,
+    template_1stage,
     template_2stages,
     template_3stages,
 )
 from .data_builder import GLUEDataBuilder
 
 
-class TestExecutionEngineClass(MultiProcessTestCase):
-    microbatch_size: int = 1
+class OobleckEngineTestBase(OobleckMultiprocessTestBase):
+    def prepare(
+        self,
+    ) -> tuple[ExecutionEngine, ModelWrapper, OptimizerWrapper, DataLoader]:
+        self.init_oobleck()
 
-    def init_configuration_engine(self, temp_dir: Path):
-        pipe, child_pipe = multiprocessing.Pipe()
-        # dist info
-        pipe.send([HostInfo("127.0.0.1", 2, 1234 + i) for i in range(9)])
-        # port info
-        pipe.send(1234)
-        self.pipe = pipe
-
-        ConfigurationEngine.create(
-            child_pipe, self.rank // 2, self.rank % 2, tag, temp_dir
+        configuration_engine = ConfigurationEngine.get_instance()
+        init_profile_data(
+            configuration_engine.base_dir / tag / "profile",
+            self.tp_size,
+            self.microbatch_size,
+            "fp32",
         )
 
-    def get_plugin(self) -> OobleckPlugin:
+        templates = [template_1stage, template_2stages, template_3stages]
         plugin = OobleckPlugin(
-            tp_size=2,
-            global_batch_size=12,
+            tp_size=self.tp_size,
+            global_batch_size=self.global_batch_size,
             microbatch_size=self.microbatch_size,
             precision="fp32",
         )
-        return plugin
 
-    @property
-    def world_size(self):
-        return 18
+        engine = ExecutionEngine(plugin)
 
-    def setUp(self):
-        super().setUp()
-        self._spawn_processes()
+        dataloader = GLUEDataBuilder("gpt2", plugin).train_dataloader()
+        model = GPT2ForSequenceClassification(config)
 
-    def tearDown(self):
-        super().tearDown()
-        ConfigurationEngine._instance = None
+        optimizer = Adam(model.parameters())
+        lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
 
-    def fake_init_distributed(self):
-        print(f"dist init r={self.rank}, world={self.world_size}")
-        return dist.init_process_group(
-            init_method=f"{FILE_SCHEMA}{self.file_name}",
-            backend="gloo",
-            world_size=self.world_size,
-            rank=self.rank,
+        with (
+            patch(
+                "oobleck.engine.execution_engine.create_pipeline_templates",
+                return_value=templates,
+            ),
+            patch.object(
+                configuration_engine, "init_distributed", new=self.init_distributed
+            ),
+        ):
+            model, optimizer, _, dataloader, lr_scheduler = engine.prepare(
+                model=model,
+                optimizer=optimizer,
+                dataloader=dataloader,
+                lr_scheduler=lr_scheduler,
+            )
+
+        return engine, model, optimizer, dataloader
+
+    def do_step(
+        self,
+        engine: ExecutionEngine,
+        model: ModelWrapper,
+        optimizer: OptimizerWrapper,
+        dataloader: DataLoader,
+    ):
+        engine.execute(
+            iter(dataloader),
+            model,
+            lambda outputs, inputs: outputs.loss,
+            optimizer,
+            return_loss=True,
+            return_outputs=True,
         )
+
+        optimizer.step()
+        optimizer.zero_grad()
+
+
+class TestEngineExecutionClass(OobleckEngineTestBase):
+    @parametrize(
+        "num_hosts, tp_size",
+        [(1, 4), (2, 2), (3, 1), (4, 1)],
+    )
+    @requires_nccl()
+    @skip_if_lt_x_gpu(4)
+    def test_engine_execute(self, num_hosts: int, tp_size: int):
+        self.num_hosts = num_hosts
+        self.tp_size = tp_size
+
+        if self.rank >= self.world_size:
+            sys.exit(0)
+
+        engine, model, optimizer, dataloader = self.prepare()
+        with (
+            patch.object(
+                model, "sync_dp_grads", wraps=model.sync_dp_grads
+            ) as sync_mock,
+            patch.object(
+                engine.plugin.schedule,
+                "forward_step",
+                wraps=engine.plugin.schedule.forward_step,
+            ) as forward_mock,
+            patch.object(
+                engine.plugin.schedule,
+                "backward_step",
+                wraps=engine.plugin.schedule.backward_step,
+            ) as backward_mock,
+        ):
+            self.do_step(engine, model, optimizer, dataloader)
+
+        dist.barrier()
+        torch.cuda.synchronize()
+
+        assert sync_mock.call_count == 1
+
+        num_microbatches = engine.plugin.num_microbatches[
+            engine.plugin.pipelines[engine.plugin._pipeline_index]
+        ]
+        assert forward_mock.call_count == num_microbatches
+        assert backward_mock.call_count == num_microbatches
+
+
+class TestEnginePrepareClass(OobleckEngineTestBase):
+    backend: str = "gloo"
+    num_hosts: int = 9
+    tp_size: int = 2
 
     @parametrize(
         "pipelines",
@@ -96,47 +171,17 @@ class TestExecutionEngineClass(MultiProcessTestCase):
         else "heterogeneous",
     )
     def test_engine_prepare(self, pipelines: list[PipelineTemplate]):
-        temp_dir = TemporaryDirectory()
-        self.init_configuration_engine(Path(temp_dir.name))
-        init_profile_data(
-            Path(temp_dir.name) / tag / "profile",
-            tp_size=2,
-            microbatch_size=self.microbatch_size,
-            precision="fp32",
-        )
-
-        plugin = self.get_plugin()
-        engine = ExecutionEngine(plugin)
-
-        model = GPT2ForSequenceClassification(config)
-
-        dataloader = GLUEDataBuilder("gpt2", plugin).train_dataloader()
-
-        optimizer = Adam(model.parameters())
-        lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
-
-        assert not dist.is_initialized()
-
-        with (
-            patch(
-                "oobleck.engine.execution_engine.PipelineInstantiator.instantiate",
-                return_value=(
-                    dict(Counter(pipelines)),
-                    {template: 12 // len(pipelines) for template in pipelines},
-                ),
-            ),
-            patch.object(
-                ConfigurationEngine._instance,
-                "init_distributed",
-                new=self.fake_init_distributed,
+        with patch(
+            "oobleck.engine.execution_engine.PipelineInstantiator.instantiate",
+            return_value=(
+                dict(Counter(pipelines)),
+                {
+                    template: self.global_batch_size // len(pipelines)
+                    for template in pipelines
+                },
             ),
         ):
-            model, optimizer, _, dataloader, lr_scheduler = engine.prepare(
-                model=model,
-                optimizer=optimizer,
-                dataloader=dataloader,
-                lr_scheduler=lr_scheduler,
-            )
+            engine, model, optimizer, dataloader = self.prepare()
 
         assert isinstance(model, HeterogeneousParallelModule)
         assert isinstance(
@@ -149,112 +194,13 @@ class TestExecutionEngineClass(MultiProcessTestCase):
 
         assert dist.is_initialized()
 
-        assert list(range(1, self.world_size // 2 + 1)) == sorted(
-            template.num_stages for template in engine.pipeline_templates
-        )
-
         assert engine.plugin.pipelines == pipelines
         assert (
             sum(engine.plugin.num_microbatches[pipeline] for pipeline in pipelines)
-            == 12
+            == self.global_batch_size
         )
         assert engine.plugin.dp_size == len(pipelines)
 
-    @parametrize(
-        "pipeline_templates",
-        [
-            [template_3stages, template_3stages, template_3stages],
-            [template_3stages, template_2stages, template_2stages, template_2stages],
-        ],
-        name_fn=lambda pipeline_templates: "homogeneous"
-        if len(pipeline_templates) == 3
-        else "heterogeneous",
-    )
-    @unittest.skip("Gloo does not support pipeline send/recv")
-    def test_engine_execute(self, pipeline_templates: list[PipelineTemplate]):
-        temp_dir = TemporaryDirectory()
-        self.init_configuration_engine(Path(temp_dir.name))
-        init_profile_data(
-            Path(temp_dir.name) / tag / "profile",
-            tp_size=2,
-            microbatch_size=self.microbatch_size,
-            precision="fp32",
-        )
 
-        plugin = self.get_plugin()
-        engine = ExecutionEngine(plugin)
-
-        global config
-        model = GPT2ForSequenceClassification(config)
-
-        dataloader = GLUEDataBuilder("gpt2", plugin).train_dataloader()
-
-        optimizer = Adam(model.parameters())
-        lr_scheduler = get_linear_schedule_with_warmup(optimizer, 0, 100)
-
-        with (
-            patch(
-                "oobleck.engine.execution_engine.PipelineInstantiator.instantiate",
-                return_value=(
-                    dict(Counter(pipeline_templates)),
-                    {
-                        template: 12 // len(pipeline_templates)
-                        for template in pipeline_templates
-                    },
-                ),
-            ),
-            patch(
-                "oobleck.planner.create_pipeline_templates",
-                return_value={
-                    template.num_stages: template for template in pipeline_templates
-                },
-            ),
-            patch.object(
-                ConfigurationEngine._instance,
-                "init_distributed",
-                new=self.fake_init_distributed,
-            ),
-        ):
-            model, optimizer, criterion, dataloader, lr_scheduler = engine.prepare(
-                model=model,
-                criterion=lambda outputs, inputs: outputs.loss,
-                dataloader=dataloader,
-                optimizer=optimizer,
-                lr_scheduler=lr_scheduler,
-            )
-
-        assert isinstance(model, HeterogeneousParallelModule)
-        assert isinstance(
-            optimizer, (HybridParallelAMPOptimizer, HybridParallelNaiveOptimizer)
-        )
-
-        iterator = iter(dataloader)
-
-        with (
-            patch.object(
-                model, "sync_dp_grads", wraps=model.sync_dp_grads
-            ) as sync_mock,
-            patch.object(
-                plugin.schedule, "forward_step", wraps=plugin.schedule.forward_step
-            ) as forward_mock,
-            patch.object(
-                plugin.schedule, "backward_step", wraps=plugin.schedule.backward_step
-            ) as backward_mock,
-        ):
-            result = engine.execute(iterator, model, criterion, optimizer)
-
-        assert sync_mock.call_count == 1
-        assert (
-            result["loss"] is not None
-            if plugin.stage_manager.is_last_stage()
-            else result["loss"] is None
-        )
-
-        num_microbatches = plugin.num_microbatches[
-            plugin._pipeline_index_to_pipeline[plugin._pipeline_index]
-        ]
-        assert forward_mock.call_count == num_microbatches
-        assert backward_mock.call_count == num_microbatches
-
-
-instantiate_parametrized_tests(TestExecutionEngineClass)
+instantiate_parametrized_tests(TestEngineExecutionClass)
+instantiate_parametrized_tests(TestEnginePrepareClass)

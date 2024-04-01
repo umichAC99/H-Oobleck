@@ -1,7 +1,5 @@
 import json
-import multiprocessing
 import sys
-from multiprocessing.connection import Connection
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -16,7 +14,6 @@ from oobleck_colossalai.pipeline_template import PipelineTemplate
 from torch.optim import Adam
 from torch.testing._internal.common_distributed import (
     TEST_SKIPS,
-    MultiProcessTestCase,
     requires_nccl,
     skip_if_lt_x_gpu,
 )
@@ -31,64 +28,21 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
-from oobleck.elastic.run import HostInfo
 from oobleck.engine.configuration_engine import ConfigurationEngine
 from oobleck.engine.plugin import OobleckPlugin
 
-from ..conftest import config, tag
-from .conftest import template_1stage, template_2stages, template_3stages
+from ..conftest import config
+from .conftest import (
+    OobleckMultiprocessTestBase,
+    template_1stage,
+    template_2stages,
+    template_3stages,
+)
 from .data_builder import GLUEDataBuilder
 
-microbatch_size: int = 1
-global_batch_size: int = 12
 
-
-class OobleckReconfigurationClassBase(MultiProcessTestCase):
-    num_hosts: int
-    tp_size: int = 1
-    pipe: Connection
+class OobleckReconfigurationClassBase(OobleckMultiprocessTestBase):
     reconfiguration_count: int = 0
-
-    @property
-    def world_size(self) -> int:
-        return self.num_hosts * self.tp_size
-
-    def setUp(self):
-        super().setUp()
-        self._spawn_processes()
-
-    def tearDown(self):
-        super().tearDown()
-        ConfigurationEngine._instance = None
-
-    def init_oobleck(self):
-        torch.cuda.set_device(self.rank)
-
-        pipe, child_pipe = multiprocessing.Pipe()
-        # dist info
-        pipe.send(
-            [
-                HostInfo("127.0.0.1", self.tp_size, 1234 + i)
-                for i in range(self.world_size)
-            ]
-        )
-        # port info
-        pipe.send(1234)
-        self.pipe = pipe
-
-        temp_dir = Path(TemporaryDirectory().name)
-
-        ConfigurationEngine.create(
-            child_pipe,
-            self.rank // self.tp_size,
-            self.rank % self.tp_size,
-            tag,
-            temp_dir,
-        )
-
-        # Consume port info that is sent from agent process
-        assert ConfigurationEngine.get_instance().receive_distributed_port() == 1234
-        self.init_distributed()
 
     def init_distributed(self):
         if dist.is_initialized():
@@ -121,20 +75,22 @@ class OobleckReconfigurationClassBase(MultiProcessTestCase):
         self, pipelines: list[PipelineTemplate]
     ) -> tuple[OobleckPlugin, ModelWrapper, OptimizerWrapper, DataLoader]:
         self.init_oobleck()
+        self.init_distributed()
 
         templates = [template_1stage, template_2stages]
 
         plugin = OobleckPlugin(
             tp_size=self.tp_size,
-            global_batch_size=global_batch_size,
-            microbatch_size=microbatch_size,
+            global_batch_size=self.global_batch_size,
+            microbatch_size=self.microbatch_size,
             precision="bf16",
         )
 
         plugin.set_pipelines(
             pipelines=pipelines,
             num_microbatches={
-                template: global_batch_size // len(templates) for template in templates
+                template: self.global_batch_size // len(templates)
+                for template in templates
             },
         )
 
@@ -203,9 +159,9 @@ class OobleckReconfigurationClassBase(MultiProcessTestCase):
                 side_effect=lambda self, num_templates: (
                     0,
                     {
-                        template_1stage: global_batch_size
+                        template_1stage: self.global_batch_size
                         // sum(num_templates.values()),
-                        template_2stages: global_batch_size
+                        template_2stages: self.global_batch_size
                         // sum(num_templates.values()),
                     },
                 ),
