@@ -11,7 +11,9 @@ from .conftest import template_1stage, template_2stages, template_3stages
     ids=lambda num_nodes: f"{num_nodes} nodes",
 )
 def test_instantiate(num_nodes: int):
-    instantiator = PipelineInstantiator([template_2stages, template_3stages], 512)
+    instantiator = PipelineInstantiator(
+        {2: template_2stages, 3: template_3stages}, 512, 1
+    )
     result = instantiator.instantiate(num_nodes)
 
     assert isinstance(result, tuple)
@@ -30,7 +32,7 @@ def test_instantiate(num_nodes: int):
 
 
 def test_instantiate_onenode():
-    instantiator = PipelineInstantiator([template_1stage], 32)
+    instantiator = PipelineInstantiator({1: template_1stage}, 32, 1)
     result = instantiator.instantiate(1)
 
     assert isinstance(result, tuple)

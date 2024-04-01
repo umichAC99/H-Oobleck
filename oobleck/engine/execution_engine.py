@@ -126,6 +126,7 @@ class ExecutionEngine:
         pipeline_instantiator = PipelineInstantiator(
             self.pipeline_templates,
             self.plugin.global_batch_size // self.plugin.microbatch_size,
+            self.plugin.fault_tolerance_threshold,
         )
         num_instances, num_microbatches = pipeline_instantiator.instantiate(
             len(configuration_engine.dist_info)

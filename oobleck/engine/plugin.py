@@ -43,6 +43,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
         tp_size: int,
         global_batch_size: int,
         microbatch_size: int,
+        fault_tolerance_threshold: int = 3,
         precision: str = "fp16",
         enable_fused_normalization: bool = False,
         enable_flash_attention: bool = False,
@@ -68,6 +69,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
         )
 
         self.global_batch_size = global_batch_size
+        self.fault_tolerance_threshold = fault_tolerance_threshold
 
     def _instantiate_pipelines(
         self,
@@ -93,7 +95,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
             dict[PipelineTemplate, int]: Number of microbatches for each pipeline
         """
         pipeline_instantiator = PipelineInstantiator(
-            pipeline_templates, global_num_microbatches
+            pipeline_templates, global_num_microbatches, self.fault_tolerance_threshold
         )
         configuration_engine = ConfigurationEngine.get_instance()
 

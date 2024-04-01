@@ -14,9 +14,11 @@ class PipelineInstantiator:
         self,
         pipeline_templates: dict[int, PipelineTemplate],
         global_num_microbatches: int,
+        fault_tolerance_threshold: int,
     ):
         self.pipeline_templates = pipeline_templates
         self.global_num_microbatches = global_num_microbatches
+        self.fault_tolerance_threshold = fault_tolerance_threshold
 
     def instantiate(
         self, num_nodes: int
@@ -42,6 +44,7 @@ class PipelineInstantiator:
         instantiations_options = self._enumerate_instantiation_options(num_nodes)
 
         # Call self._distribute_batch for each element in instantiations_options
+        # Should also include None to properly calculate "index" of optimal dist
         batch_distributions = [
             self.distribute_batch(option) for option in instantiations_options
         ]
@@ -52,14 +55,17 @@ class PipelineInstantiator:
             )
 
         str = "Batch distributions===============\n"
-        for latency, dist in batch_distributions:
+        for latency_dist in batch_distributions:
+            if latency_dist is None:
+                continue
+            latency, dist = latency_dist
             str += f"  {dist} (latency {latency} ms)\n"
         str + "=================================="
         logger.debug(str)
 
         # Find the second dictionary where its corresponding float is the minimum
         optimal_distribution = min(
-            (dist for dist in batch_distributions if dist is not None),
+            [dist for dist in batch_distributions if dist is not None],
             key=lambda x: x[0],
         )
         index = batch_distributions.index(optimal_distribution)
@@ -117,7 +123,11 @@ class PipelineInstantiator:
             raise RuntimeError(
                 f"Failed to find feasible sets of pipeline templates for {num_nodes} nodes."
             )
-        return dp[-1][-1]
+        return [
+            option
+            for option in dp[-1][-1]
+            if sum(option.values()) >= self.fault_tolerance_threshold
+        ]
 
     def distribute_batch(
         self,
@@ -145,6 +155,12 @@ class PipelineInstantiator:
 
             Or None if the optimal solution is not found.
         """
+
+        assert sum(num_pipelines.values()) >= self.fault_tolerance_threshold, (
+            f"The number of pipelines {sum(num_pipelines.values())} should be "
+            "greater than or equal to the fault tolerance threshold "
+            f"{self.fault_tolerance_threshold}."
+        )
 
         model = pulp.LpProblem("Microbatch Distribution", pulp.LpMinimize)
 
