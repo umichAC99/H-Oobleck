@@ -367,7 +367,8 @@ class ModelProfiler:
 
         logger.debug("Profiler finished.")
 
-        if dist.get_rank() == 0:
+        rank = dist.get_rank()
+        if rank == 0:
             microbatch_size = inputs["input_ids"].shape[0]
             profile_path = ModelProfiler.get_profile_path(
                 profile_dir, tp_size, microbatch_size, precision
@@ -420,3 +421,6 @@ class ModelProfiler:
         torch.cuda.synchronize()
 
         dist.destroy_process_group()
+
+        if rank == 0:
+            store_path.unlink()
