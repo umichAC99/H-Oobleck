@@ -232,4 +232,5 @@ class ExecutionEngine:
             self.pipeline_templates, model, optimizer, dataloader
         )
         self.need_reconfiguration = False
+        logger.info("Reconfiguration is done.")
         return model, optimizer, dataloader
