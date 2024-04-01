@@ -52,6 +52,7 @@ class OobleckReconfigurationClassBase(OobleckMultiprocessTestBase):
             global_batch_size=self.global_batch_size,
             microbatch_size=self.microbatch_size,
             precision="bf16",
+            fault_tolerance_threshold=1,
         )
 
         plugin.set_pipelines(
@@ -124,12 +125,12 @@ class OobleckReconfigurationClassBase(OobleckMultiprocessTestBase):
             ),
             patch(
                 "oobleck.engine.plugin.PipelineInstantiator.distribute_batch",
-                side_effect=lambda self, num_templates: (
+                side_effect=lambda self, num_templates, need_all_pipelines_have_batch: (
                     0,
                     {
-                        template_1stage: self.global_batch_size
+                        template_1stage: self.global_num_microbatches
                         // sum(num_templates.values()),
-                        template_2stages: self.global_batch_size
+                        template_2stages: self.global_num_microbatches
                         // sum(num_templates.values()),
                     },
                 ),

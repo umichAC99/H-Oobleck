@@ -66,6 +66,7 @@ class OobleckEngineTestBase(OobleckMultiprocessTestBase):
             global_batch_size=self.global_batch_size,
             microbatch_size=self.microbatch_size,
             precision="fp32",
+            fault_tolerance_threshold=1,
         )
 
         engine = ExecutionEngine(plugin)
