@@ -32,9 +32,10 @@ struct NodeConfig {
   int node_type_idx;
   int num_nodes;
   int num_gpus;
+  double compute_power;
   // memory
   NodeConfig(std::string node_type, int num_nodes, int num_gpus_per_node, double compute_power)
-      : num_nodes(num_nodes), num_gpus(num_gpus_per_node) {
+      : num_nodes(num_nodes), num_gpus(num_gpus_per_node), compute_power(compute_power) {
         if (node_specs_map.find(node_type) == node_specs_map.end()) {
           node_specs.push_back(SingleNodeSpec(node_type, num_gpus_per_node, compute_power));
           node_specs_map[node_type] = node_specs.size() - 1;
@@ -111,8 +112,10 @@ public:
   HeteroPipelineTemplate(
       const std::vector<std::shared_ptr<StageExecutionResult>>&
                        stage_execution_results,
+      const double iteration_time,
       int num_layers, const HeteroNodeSpec &node_spec)
       : stage_execution_results_(stage_execution_results),
+        iteration_time_(iteration_time),
         node_spec_(node_spec) {
     // Run divide and conquer to create a vector of StageExecutionResult
     // Perform assertion
@@ -136,6 +139,8 @@ public:
     
   }
 
+  const double get_iteration_time() const { return iteration_time_; }
+
   const std::vector<std::shared_ptr<StageExecutionResult>> &get_stages() const {
     return stage_execution_results_;
   }
@@ -144,6 +149,7 @@ public:
 
 private:
   std::vector<std::shared_ptr<StageExecutionResult>> stage_execution_results_;
+  const double iteration_time_;
   HeteroNodeSpec node_spec_;
 };
 

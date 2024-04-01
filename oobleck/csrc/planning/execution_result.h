@@ -36,6 +36,11 @@ class LayerExecutionResult {
   std::map<int, double> allreduce_in_node_;
   std::map<int, double> allreduce_across_nodes_;
   std::tuple<int, int> mem_required_;
+
+  std::string to_string() const {
+    return "LayerExecutionResult[" + std::to_string(layer_index_) + "] with forward: " +
+           std::to_string(forward_) + ", backward: " + std::to_string(backward_);
+  }
 };
 
 class LayerExecutionResults

@@ -20,6 +20,7 @@ class NodeConfig:
     _node_type_idx: int
     _num_nodes: int
     _num_gpus: int
+    _compute_power: float
     
 class HeteroNodeSpec:
     def get(self) -> list[NodeConfig]: ...

@@ -33,7 +33,17 @@ PYBIND11_MODULE(pipeline_template, m) {
       .def(py::init<std::vector<LayerExecutionResult> &&>())
       .def("get", &LayerExecutionResults::get)
       .def("at", &LayerExecutionResults::at, py::arg("index"))
-      .def_property_readonly("size", &LayerExecutionResults::size);
+      .def_property_readonly("size", &LayerExecutionResults::size)
+      .def("__repr__", [](const LayerExecutionResults &lers) {
+        std::string repr = "<oobleck.LayerExecutionResults.[";
+        for (const auto &ler : lers.get()) {
+          repr += ler.to_string() + "\n";
+        }
+        repr.pop_back();
+        repr.pop_back();
+        repr += "]>";
+        return repr;
+      });
 
   py::class_<StageExecutionResult, std::shared_ptr<StageExecutionResult>>(
       m, "StageExecutionResult")
@@ -82,6 +92,7 @@ PYBIND11_MODULE(pipeline_template, m) {
       .def_readonly("_node_type_idx", &NodeConfig::node_type_idx)
       .def_readonly("_num_nodes", &NodeConfig::num_nodes)
       .def_readonly("_num_gpus", &NodeConfig::num_gpus)
+      .def_readonly("_compute_power", &NodeConfig::compute_power)
       .def("__repr__", [](const NodeConfig &sns) {
         return "<oobleck.NodeConfig." +
                node_specs[sns.node_type_idx].node_type + "[ " +
@@ -105,11 +116,15 @@ PYBIND11_MODULE(pipeline_template, m) {
 
   py::class_<HeteroPipelineTemplate>(m, "HeteroPipelineTemplate")
       .def(py::init<const std::vector<std::shared_ptr<StageExecutionResult>> &,
+                    const double,
                     const int, const HeteroNodeSpec &>())
       .def("get_stages", &HeteroPipelineTemplate::get_stages)
       .def("get_node_spec", &HeteroPipelineTemplate::get_node_spec)
+      .def_property_readonly("_iteration_time",
+                             &HeteroPipelineTemplate::get_iteration_time)
       .def("__repr__", [](const HeteroPipelineTemplate &hpt) {
         std::string repr = "<oobleck.HeteroPipelineTemplate.[";
+        repr += "t: " + std::to_string(hpt.get_iteration_time()) + ", ";
         repr += "stages: [";
         for (const auto &stage : hpt.get_stages()) {
           repr += stage->to_string() + ", ";

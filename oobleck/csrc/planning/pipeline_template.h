@@ -107,7 +107,7 @@ std::vector<std::shared_ptr<LayerExecutionResults>> get_hetero_profile_results(
 class PipelineTemplateGenerator {
  public:
   CacheMap dc_cache_;
-  cppcoro::static_thread_pool thread_pool_;
+  cppcoro::static_thread_pool thread_pool_ = cppcoro::static_thread_pool(1);
 
   std::vector<PipelineTemplate> create_pipeline_templates(
       std::shared_ptr<LayerExecutionResults> layer_execution_results,
