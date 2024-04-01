@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 from multiprocessing.connection import Connection
 from pathlib import Path
 
@@ -115,10 +116,14 @@ class ConfigurationEngine:
         return self.agent_index == 0 and self.local_rank == 0
 
     def recv_reconfiguration_notification(self):
-        message = self.pipe.recv()
-        assert (
-            message == "reconfigure"
-        ), f"Unexpected reconfiguration message: {message}"
+        try:
+            message = self.pipe.recv()
+            assert (
+                message == "reconfigure"
+            ), f"Unexpected reconfiguration message: {message}"
+        except Exception:
+            # Corresponding agent died. This process should also die.
+            os._exit(1)
 
     def send_distributed_port(self, port: int):
         self.pipe.send(port)
