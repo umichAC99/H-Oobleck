@@ -11,6 +11,10 @@ from colossalai.booster import Booster
 from colossalai.shardformer.policies.auto_policy import _fullname
 from loguru import logger
 from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.shardformer.policies.auto_policy import get_autopolicy
+from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
+    PipelineTemplatePolicyBase,
+)
 from torch.distributed import distributed_c10d
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
@@ -112,8 +116,9 @@ class ExecutionEngine:
         max_num_nodes = configuration_engine.world_size // self.plugin.tp_size
 
         logger.debug("Creating pipeline templates...")
-        self.pipeline_templates = create_pipeline_templates(
-            _fullname(model),
+        model_name = _fullname(model)
+        pipeline_templates = create_pipeline_templates(
+            model_name,
             configuration_engine.base_dir / configuration_engine.tag / "profile",
             self.plugin.microbatch_size,
             self.plugin.tp_size,
@@ -121,6 +126,22 @@ class ExecutionEngine:
             list(range(min_num_nodes, max_num_nodes + 1)),
         )
 
+        policy: PipelineTemplatePolicyBase = get_autopolicy(model_name)
+        policy.set_model(model)
+        for key in list(pipeline_templates.keys()):
+            try:
+                template = pipeline_templates[key]
+                policy.pipeline_template_sanity_check(template)
+            except ValueError as e:
+                logger.debug(
+                    f"Pipeline template {template} failed to pass sanity check and removed: {e}"
+                )
+                del pipeline_templates[key]
+
+        if not pipeline_templates:
+            raise RuntimeError("No pipeline templates created.")
+
+        self.pipeline_templates = pipeline_templates
         logger.debug(f"Pipeline templates: {self.pipeline_templates}")
 
         pipeline_instantiator = PipelineInstantiator(
