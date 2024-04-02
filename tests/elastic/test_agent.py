@@ -8,7 +8,12 @@ import pytest
 
 from oobleck.elastic.agent import Agent, Worker
 from oobleck.elastic.master_service_pb2_grpc import OobleckMasterStub
-from oobleck.elastic.run import HostInfo, LaunchArgs, MasterService, ScriptArgs
+from oobleck.elastic.run import (
+    HostInfo,
+    LaunchArguments,
+    MasterService,
+    ScriptArguments,
+)
 from oobleck.engine.configuration_engine import ConfigurationEngine
 
 
@@ -41,7 +46,7 @@ def worker_main_forward_master_port(
 
 
 def test_agent_forward_master_port(
-    server: tuple[LaunchArgs, ScriptArgs, MasterService, int]
+    server: tuple[LaunchArguments, ScriptArguments, MasterService, int],
 ):
     args, _, _, port = server
     channel = grpc.insecure_channel(f"localhost:{port}")
@@ -67,7 +72,7 @@ def test_agent_forward_master_port(
 
 @pytest.mark.parametrize("gpu_index", [0, 1, 2, 6])
 def test_worker_main_init_configuration_engine(
-    server: tuple[LaunchArgs, ScriptArgs, MasterService, int],
+    server: tuple[LaunchArguments, ScriptArguments, MasterService, int],
     gpu_index: int,
 ):
     master_args, script_args, _, _ = server

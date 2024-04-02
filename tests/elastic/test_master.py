@@ -11,10 +11,10 @@ from pytest_mock import MockerFixture
 from oobleck.elastic import master_service_pb2, master_service_pb2_grpc
 from oobleck.elastic.run import (
     HostInfo,
-    LaunchArgs,
+    LaunchArguments,
     MasterService,
     MultiNodeAgentRunner,
-    ScriptArgs,
+    ScriptArguments,
 )
 
 
@@ -23,7 +23,9 @@ def get_stub(port: int) -> master_service_pb2_grpc.OobleckMasterStub:
     return master_service_pb2_grpc.OobleckMasterStub(channel)
 
 
-def test_get_dist_info(server: tuple[LaunchArgs, ScriptArgs, MasterService, int]):
+def test_get_dist_info(
+    server: tuple[LaunchArguments, ScriptArguments, MasterService, int],
+):
     fake_master_args, _, _, port = server
     stub = get_stub(port)
     dist_info = stub.GetDistInfo(Empty())
@@ -37,7 +39,8 @@ def test_get_dist_info(server: tuple[LaunchArgs, ScriptArgs, MasterService, int]
 
 
 def test_get_code(
-    server: tuple[LaunchArgs, ScriptArgs, MasterService, int], mocker: MockerFixture
+    server: tuple[LaunchArguments, ScriptArguments, MasterService, int],
+    mocker: MockerFixture,
 ):
     _, fake_script_args, _, port = server
     stub = get_stub(port)
@@ -57,7 +60,7 @@ def test_get_code(
 
 
 def test_receive_reconfiguration_notification(
-    server: tuple[LaunchArgs, ScriptArgs, MasterService, int]
+    server: tuple[LaunchArguments, ScriptArguments, MasterService, int],
 ):
     _, _, service, port = server
 
@@ -92,7 +95,7 @@ def test_receive_reconfiguration_notification(
 
 
 def test_run_agents(
-    server: tuple[LaunchArgs, ScriptArgs, MasterService, int],
+    server: tuple[LaunchArguments, ScriptArguments, MasterService, int],
     mocker: MockerFixture,
 ):
     args, _, _, port = server

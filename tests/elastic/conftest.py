@@ -6,7 +6,12 @@ import grpc
 import pytest
 
 from oobleck.elastic import master_service_pb2_grpc
-from oobleck.elastic.run import HostInfo, LaunchArgs, MasterService, ScriptArgs
+from oobleck.elastic.run import (
+    HostInfo,
+    LaunchArguments,
+    MasterService,
+    ScriptArguments,
+)
 
 fake_host_info = [
     HostInfo("127.0.0.1", 2, 1234),
@@ -16,8 +21,10 @@ fake_host_info = [
 
 
 @pytest.fixture()
-def server(tmp_path: Path) -> tuple[LaunchArgs, ScriptArgs, MasterService, int]:
-    fake_launch_args = LaunchArgs(
+def server(
+    tmp_path: Path,
+) -> tuple[LaunchArguments, ScriptArguments, MasterService, int]:
+    fake_launch_args = LaunchArguments(
         hostfile=Path(tmp_path / "hostfile"),
         tag="test-gpt2",
         base_dir=tmp_path,
@@ -32,7 +39,7 @@ def server(tmp_path: Path) -> tuple[LaunchArgs, ScriptArgs, MasterService, int]:
         )
     )
 
-    fake_script_args = ScriptArgs(
+    fake_script_args = ScriptArguments(
         training_script=Path(tmp_path / "testscript.py"),
         training_script_args=["--foo", "bar", "--baz", "qux"],
     )
