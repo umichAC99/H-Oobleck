@@ -11,11 +11,13 @@ This mode executes workers in this node. As only one node training is possible, 
 
 **Use `run_singlenode.py` script.** If you want to run `run_gpt2.py`:
 ```bash
-python run_singlenode.py --tag <tag> --num_workers 4 --script run_gpt2.py --model_name_or_path gpt2
+python run_singlenode.py --tag <tag> --num_agents 2 --num_gpus_per_agent 2 run_gpt2.py --tp_size 2
 ```
-where `--model_name_or_path` is the model name in HuggingFace (including company name) to download the model from HuggingFace model.
+which uses 4 GPUs.
 
 Oobleck profiles the given model and uses the profile result to generate pipeline templates. The profile result is cached in `<base_dir>/<tag>/profile` (where default `<base_dir>` is `/tmp/oobleck`, which can be overridden).
+
+`--num_gpus_per_agent` should be the same with `tp_size`.
 
 ## Run full Oobleck
 
@@ -41,7 +43,7 @@ that specifies nodes to be used for training. The master daemon accesses each da
 
 Now, **use `oobleck.elastic.run` module.** If you want to run `run_gpt2.py`:
 ```bash
-python -m oobleck.elastic.run --hostfile <path_to_hostfile> --tag <tag> run_gpt2.py --model_name_or_path gpt2
+python -m oobleck.elastic.run --hostfile <path_to_hostfile> --tag <tag> run_gpt2.py --tp_size 2
 ```
 
 Each agent's output will be forwarded to `<base_dir>/<tag>/agent<index>.log`.

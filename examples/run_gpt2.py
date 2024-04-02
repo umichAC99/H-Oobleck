@@ -1,6 +1,7 @@
+from dataclasses import dataclass
+
 import simple_parsing
 from data_builder import GLUEDataBuilder
-from run_singlenode import TrainingArguments
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
@@ -14,6 +15,15 @@ from transformers import (
 from oobleck import ExecutionEngine, OobleckPlugin
 
 
+@dataclass
+class TrainingArguments:
+    model_name_or_path: str = "gpt2"
+    global_batch_size: int = 64
+    num_epoch: int = 3
+    warmup_faction: float = 0.1
+    tp_size: int = 1
+
+
 def main():
     args: TrainingArguments = simple_parsing.parse(TrainingArguments)
 
@@ -24,6 +34,7 @@ def main():
         precision="bf16",
         enable_fused_normalization=True,
         enable_flash_attention=True,
+        fault_tolerance_threshold=1,
     )
 
     engine = ExecutionEngine(plugin)

@@ -34,7 +34,7 @@ broadcast `reconfigure` message to all live agents.
 
 
 @dataclass
-class LaunchArgs:
+class LaunchArguments:
     # Path to the hostfile
     hostfile: Path
     # A tag to identify this run
@@ -48,7 +48,7 @@ class LaunchArgs:
 
 
 @dataclass
-class ScriptArgs:
+class ScriptArguments:
     training_script: Path = field(positional=True)
     training_script_args: list[str] = field(positional=True, nargs=REMAINDER)
 
@@ -223,7 +223,7 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
 
     def __init__(
         self,
-        script_args: ScriptArgs,
+        script_args: ScriptArguments,
         hostinfo: list[HostInfo],
         disconnect_condition: Condition,
     ):
@@ -294,7 +294,7 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
 
 def serve():
     parser = ArgumentParser()
-    parser.add_arguments(LaunchArgs, dest="launch")
+    parser.add_arguments(LaunchArguments, dest="launch")
 
     # positional arguments
     parser.add_argument(
@@ -306,8 +306,8 @@ def serve():
     parser.add_argument("training_script_args", nargs=REMAINDER)
 
     args = parser.parse_args()
-    launch_args: LaunchArgs = args.launch
-    script_args = ScriptArgs(args.training_script, args.training_script_args)
+    launch_args: LaunchArguments = args.launch
+    script_args = ScriptArguments(args.training_script, args.training_script_args)
 
     logger.info(f"Dist arguments: {launch_args}")
     logger.info(f"Script arguments: {script_args}")
