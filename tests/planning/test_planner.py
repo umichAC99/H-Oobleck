@@ -5,10 +5,9 @@ import pytest
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 
 from oobleck.planning import planner
-from oobleck.planning.profiler import LayerExecutionResult, ModelProfiler
+from oobleck.planning.profiler import LayerExecutionResult
 
 from ..conftest import (
-    config,
     init_profile_data,
     load_profile_data,
     model_name,
