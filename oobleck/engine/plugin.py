@@ -62,7 +62,6 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
             tp_size=tp_size,
             microbatch_size=microbatch_size,
             precision=precision,
-            enable_all_optimization=False,
             enable_fused_normalization=enable_fused_normalization,
             enable_flash_attention=enable_flash_attention,
             enable_jit_fused=enable_jit_used,
