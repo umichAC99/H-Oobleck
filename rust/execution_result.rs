@@ -1,9 +1,7 @@
+use pyo3::conversion::FromPyObject;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::clone::Clone;
 use std::cmp::{Ordering, PartialEq};
-use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Serialize, Deserialize)]
@@ -35,57 +33,27 @@ impl ProfileResult {
 
 #[derive(Serialize, Deserialize)]
 pub struct LayerExecutionResult {
-    layer_index: u32,
-    layer_name: String,
-    forward: f64,
-    backward: f64,
-    mem_required: u64,
+    pub layer_index: u32,
+    pub layer_name: String,
+    pub forward: f64,
+    pub backward: f64,
+    pub mem_required: u64,
 }
 
-impl LayerExecutionResult {
-    pub fn new(
-        layer_index: u32,
-        layer_name: String,
-        forward: f64,
-        backward: f64,
-        mem_required: u64,
-    ) -> Self {
-        LayerExecutionResult {
+impl<'source> FromPyObject<'source> for LayerExecutionResult {
+    fn extract(ob: &'source pyo3::PyAny) -> pyo3::PyResult<Self> {
+        let layer_index: u32 = ob.getattr("layer_index")?.extract()?;
+        let layer_name: String = ob.getattr("layer_name")?.extract()?;
+        let forward: f64 = ob.getattr("forward")?.extract()?;
+        let backward: f64 = ob.getattr("backward")?.extract()?;
+        let mem_required: u64 = ob.getattr("mem_required")?.extract()?;
+        Ok(LayerExecutionResult {
             layer_index,
             layer_name,
             forward,
             backward,
             mem_required,
-        }
-    }
-
-    pub fn get_profile_results(
-        job_profile_dir: PathBuf,
-        microbatch_size: u32,
-        tp_size: u32,
-        precision: String,
-    ) -> Result<Vec<LayerExecutionResult>, std::io::Error> {
-        let path = job_profile_dir.join(
-            "profile_tp".to_string()
-                + tp_size.to_string().as_str()
-                + "_mb"
-                + microbatch_size.to_string().as_str()
-                + "_".to_string().as_str()
-                + precision.as_str()
-                + ".json",
-        );
-        let data = match fs::read_to_string(path) {
-            Ok(data) => data,
-            Err(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "File not found",
-                ))
-            }
-        };
-
-        let data: ProfileResult = serde_json::from_str(&data).unwrap();
-        Ok(data.layers)
+        })
     }
 }
 

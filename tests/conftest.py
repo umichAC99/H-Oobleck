@@ -22,6 +22,26 @@ model_name: str = "transformers.models.gpt2.modeling_gpt2.GPT2ForSequenceClassif
 tag: str = "test-gpt2"
 
 
+def load_profile_data(
+    profile_dir: Path, tp_size: int, microbatch_size: int, precision: str
+) -> list[LayerExecutionResult]:
+    profile_path = ModelProfiler.get_profile_path(
+        profile_dir, tp_size, microbatch_size, precision
+    )
+    with profile_path.open() as f:
+        data = json.load(f)
+    return [
+        LayerExecutionResult(
+            layer_index=layer["layer_index"],
+            layer_name=layer["layer_name"],
+            forward=layer["forward"],
+            backward=layer["backward"],
+            mem_required=layer["mem_required"],
+        )
+        for layer in data["layers"]
+    ]
+
+
 def init_profile_data(
     profile_dir: Path, tp_size: int, microbatch_size: int, precision: str
 ):

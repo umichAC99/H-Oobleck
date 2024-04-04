@@ -5,8 +5,16 @@ import pytest
 from oobleck_colossalai.pipeline_template import PipelineTemplate
 
 from oobleck.planning import planner
+from oobleck.planning.profiler import LayerExecutionResult, ModelProfiler
 
-from ..conftest import init_profile_data, model_name, modules, tag
+from ..conftest import (
+    config,
+    init_profile_data,
+    load_profile_data,
+    model_name,
+    modules,
+    tag,
+)
 
 microbatch_size = 1
 tp_size = 1
@@ -14,36 +22,36 @@ precision = "fp32"
 
 
 @pytest.fixture
-def profile_dir(tmp_path: Path) -> Path:
+def profile_data(tmp_path: Path) -> list[LayerExecutionResult]:
     profile_dir_path = tmp_path / tag / "profile"
     init_profile_data(
-        profile_dir_path,
+        profile_dir=profile_dir_path,
         tp_size=tp_size,
         microbatch_size=microbatch_size,
         precision=precision,
     )
-    return profile_dir_path
+
+    return load_profile_data(
+        profile_dir=profile_dir_path,
+        tp_size=tp_size,
+        microbatch_size=microbatch_size,
+        precision=precision,
+    )
 
 
-def test_error_for_too_large_num_nodes(profile_dir: Path):
+def test_error_for_too_large_num_nodes(profile_data: list[LayerExecutionResult]):
     with pytest.raises(RuntimeError):
         planner.create_pipeline_templates(
             model_name=model_name,
-            job_profile_dir=profile_dir,
-            microbatch_size=microbatch_size,
-            tp_size=tp_size,
-            precision=precision,
+            profile_data=profile_data,
             num_nodes=[len(modules) + 1],
         )
 
 
-def test_create_pipeline_templates(profile_dir: Path):
+def test_create_pipeline_templates(profile_data: list[LayerExecutionResult]):
     templates: dict[PipelineTemplate] = planner.create_pipeline_templates(
         model_name=model_name,
-        job_profile_dir=profile_dir,
-        microbatch_size=microbatch_size,
-        tp_size=tp_size,
-        precision=precision,
+        profile_data=profile_data,
         num_nodes=[1, 2, 3, 4],
     )
 

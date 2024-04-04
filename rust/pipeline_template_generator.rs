@@ -3,9 +3,7 @@ use crate::PlannerError;
 use dashmap::DashMap;
 use log;
 use rayon::prelude::*;
-use serde_json;
 use std::cmp::Ordering;
-use std::path::PathBuf;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -18,20 +16,9 @@ pub struct PipelineTemplateGenerator {
 }
 
 impl PipelineTemplateGenerator {
-    pub fn new(
-        job_profile_dir: PathBuf,
-        microbatch_size: u32,
-        tp_size: u32,
-        precision: String,
-    ) -> Self {
+    pub fn new(profile_data: Vec<LayerExecutionResult>) -> Self {
         PipelineTemplateGenerator {
-            layer_execution_results: LayerExecutionResult::get_profile_results(
-                job_profile_dir,
-                microbatch_size,
-                tp_size,
-                precision,
-            )
-            .unwrap(),
+            layer_execution_results: profile_data,
             stage_execution_results: DashMap::new(),
             execution_result_cache: DashMap::new(),
         }
@@ -199,71 +186,38 @@ impl PipelineTemplateGenerator {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
 
     fn prepare(
         num_layers: u32,
         same_latency: bool,
         mut num_nodes: Vec<u32>,
     ) -> Result<PipelineTemplateGenerator, PlannerError> {
-        let tag = "gpt2-test";
-        let base_dir = TempDir::new().unwrap().path().to_path_buf();
-        let path = base_dir.join(tag).join("profile");
-        let microbatch_size = 1;
-        let tp_size = 1;
-        let precision = "fp32";
-        let _ = fs::remove_dir_all(path.clone());
-        fs::create_dir_all(path.clone()).unwrap();
-
-        let profile_path = path.join(
-            "profile_tp".to_string()
-                + tp_size.to_string().as_str()
-                + "_mb"
-                + microbatch_size.to_string().as_str()
-                + "_"
-                + precision
-                + ".json",
-        );
-
         let mut layer_results = vec![];
         for i in 0..num_layers {
-            layer_results.push(LayerExecutionResult::new(
-                i,
-                format!("layer{}", i),
-                if same_latency {
+            layer_results.push(LayerExecutionResult {
+                layer_index: i,
+                layer_name: format!("layer{}", i),
+                forward: if same_latency {
                     1 as f64
                 } else {
                     (i + 1) as f64
                 },
-                if same_latency {
+                backward: if same_latency {
                     1 as f64
                 } else {
                     (i + 1) as f64
                 },
-                if same_latency {
+                mem_required: if same_latency {
                     1 as u64
                 } else {
                     (i + 1) as u64
                 },
-            ));
+            });
         }
-
-        let result = ProfileResult::new(
-            "asdasd".to_string(),
-            tp_size,
-            microbatch_size,
-            precision.to_string(),
-            layer_results,
-        );
-
-        let json_string = serde_json::to_string(&result).unwrap();
-        fs::write(profile_path, json_string).unwrap();
 
         num_nodes.sort();
 
-        let mut generator =
-            PipelineTemplateGenerator::new(path, microbatch_size, tp_size, precision.to_string());
+        let mut generator = PipelineTemplateGenerator::new(layer_results);
         generator.divide_and_conquer(num_nodes[num_nodes.len() - 1])?;
         Ok(generator)
     }
