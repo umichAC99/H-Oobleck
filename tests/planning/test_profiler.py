@@ -1,7 +1,6 @@
 import json
 import multiprocessing
 import os
-import shutil
 from pathlib import Path
 
 import torch
@@ -125,6 +124,8 @@ class TestProfileModelClass(MultiProcessTestCase):
             inputs=inputs,
             warmup=1,
         )
+
+        # _profile_model automatically synchronize
 
         microbatch_size = inputs["input_ids"].shape[0]
         profile_path = ModelProfiler.get_profile_path(

@@ -223,11 +223,12 @@ class ModelProfiler:
         optim_cls = getattr(module, cls)
 
         if tp_size > 1:
+            # FIXME (insujang): copy user shardconfig as well
             shard_config = ShardConfig(
                 tensor_parallel_process_group=dist.new_group(),
                 pipeline_stage_manager=None,
                 enable_tensor_parallelism=True,
-                enable_flash_attention=True,
+                enable_flash_attention=False,
             )
             shardformer = ShardFormer(shard_config)
 
