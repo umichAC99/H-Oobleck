@@ -79,7 +79,7 @@ class Worker:
 
         argv = [script_path] + script_args
         with temporary_argv(argv):
-            runpy.run_path(script_path, run_name="__main__")
+            runpy.run_path(script_path.as_posix(), run_name="__main__")
 
 
 class Agent:
