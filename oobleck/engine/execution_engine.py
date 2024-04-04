@@ -119,10 +119,7 @@ class ExecutionEngine:
         model_name = _fullname(model)
         pipeline_templates = create_pipeline_templates(
             model_name,
-            configuration_engine.base_dir / configuration_engine.tag / "profile",
-            self.plugin.microbatch_size,
-            self.plugin.tp_size,
-            self.plugin.precision,
+            profile_data,
             list(range(min_num_nodes, max_num_nodes + 1)),
         )
 
