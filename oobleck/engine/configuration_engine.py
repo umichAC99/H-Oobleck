@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import datetime
 import itertools
 import os
+import time
 from multiprocessing.connection import Connection
 from pathlib import Path
 
@@ -123,6 +125,7 @@ class ConfigurationEngine:
             ), f"Unexpected reconfiguration message: {message}"
         except Exception:
             # Corresponding agent died. This process should also die.
+            time.sleep(60)
             os._exit(1)
 
     def send_distributed_port(self, port: int):
@@ -181,6 +184,7 @@ class ConfigurationEngine:
             store=store,
             rank=self.rank,
             world_size=self.world_size,
+            timeout=datetime.timedelta(minutes=5),
         )
 
         assert dist.is_initialized(), "Distributed environment is not initialized."

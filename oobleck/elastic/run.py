@@ -5,7 +5,8 @@ import os
 import socket
 import sys
 from argparse import REMAINDER
-from concurrent.futures import ThreadPoolExecutor
+from concurrent import futures
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from multiprocessing.context import SpawnProcess
 from multiprocessing.synchronize import Condition
@@ -15,7 +16,6 @@ import fabric
 import grpc
 from google.protobuf import empty_pb2
 from loguru import logger
-from paramiko import SSHException
 from simple_parsing import ArgumentParser
 from simple_parsing.helpers import field
 
@@ -31,6 +31,8 @@ watches disconnection evernts from agents.
 Once an agent is disconnected, the master process will
 broadcast `reconfigure` message to all live agents.
 """
+
+agent_list: list[tuple[HostInfo, Future]] = []
 
 
 @dataclass
@@ -135,7 +137,6 @@ class MultiNodeAgentRunner:
     @staticmethod
     def run_on_nodes(
         agent_index: int,
-        disconnect_condition: Condition,
         host: HostInfo,
         master_service_port: int,
         tag: str,
@@ -164,7 +165,7 @@ class MultiNodeAgentRunner:
 
                 with (
                     (
-                        sys.stdout
+                        sys.stderr
                         if debug
                         else (base_dir / tag / f"agent{agent_index}.log").open("w")
                     ) as out_stream,
@@ -176,13 +177,11 @@ class MultiNodeAgentRunner:
                         out_stream=out_stream,
                         err_stream=out_stream,
                     )
-        except SSHException as e:
-            # Notify conditional variable to notify agent disconnection
-            # to all agents.
-            logger.warning(f"SSH disconnected: {e}")
-            disconnect_condition.notify_all()
+        except Exception as e:
+            logger.warning(f"[Agent {agent_index}] SSH disconnected: {e}")
+            raise
 
-        logger.info(f"Agent {agent_index} is done. Exiting...")
+        logger.info(f"[Agent {agent_index}] done. Exiting...")
 
     def run(self, debug: bool = False) -> list[SpawnProcess]:
         """
@@ -190,24 +189,46 @@ class MultiNodeAgentRunner:
         Each process accesses a host via SSH and runs the agent.
         """
         context = multiprocessing.get_context("spawn")
-        processes: list[SpawnProcess] = []
-        for agent_index, host in enumerate(self.hosts):
-            p = context.Process(
-                target=self.run_on_nodes,
-                args=(
+        with ProcessPoolExecutor(
+            max_workers=len(self.hosts), mp_context=context
+        ) as executor:
+            global agent_list
+            for agent_index, host in enumerate(self.hosts):
+                future = executor.submit(
+                    self.run_on_nodes,
                     agent_index,
-                    self.disconnect_condition,
                     host,
                     self.master_service_port,
                     self.tag,
                     self.base_dir,
                     debug,
-                ),
-            )
-            p.start()
-            processes.append(p)
+                )
+                agent_list.append((host, future))
 
-        return processes
+            # Loop until all processes done
+            while agent_list:
+                not_done: list[Future] = [f for _, f in agent_list]
+                done, not_done = futures.wait(
+                    not_done, return_when=futures.FIRST_EXCEPTION
+                )
+
+                reconfiguration_needed = False
+                for f in done:
+                    if f.exception() is not None:
+                        reconfiguration_needed = True
+
+                    value = next(
+                        (host, future) for host, future in agent_list if future == f
+                    )
+                    agent_list.remove(value)
+
+                logger.debug("Remained agents: {}", agent_list)
+
+                if reconfiguration_needed:
+                    with self.disconnect_condition:
+                        self.disconnect_condition.notify_all()
+
+            assert not agent_list and not not_done, "All agents should be done by now."
 
 
 class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
@@ -278,7 +299,6 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
         context: grpc.RpcContext,
     ):
         with self.disconnect_condition:
-            self.clients.append(context)
             self.disconnect_condition.wait()
 
         if context.is_active():
@@ -287,7 +307,7 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
                     master_service_pb2.HostInfo(
                         ip=host.ip, slots=host.slots, port=host.port
                     )
-                    for host in self.hostinfo
+                    for host, _ in agent_list
                 ]
             )
 
@@ -329,12 +349,10 @@ def serve():
     runner = MultiNodeAgentRunner(
         disconnect_condition, hostinfo, port, launch_args.tag, launch_args.base_dir
     )
-    processes = runner.run(launch_args.debug)
-    for p in processes:
-        p.join()
+    runner.run(launch_args.debug)
 
     logger.info("Training is done. Stopping the master service.")
-    server.stop(5)
+    server.stop(grace=None)
 
 
 if __name__ == "__main__":

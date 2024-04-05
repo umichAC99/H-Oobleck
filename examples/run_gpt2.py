@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import simple_parsing
 from data_builder import GLUEDataBuilder
+from loguru import logger
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
@@ -91,13 +92,16 @@ def main():
                     criterion=lambda outputs, inputs: outputs.loss,
                     optimizer=optimizer,
                     return_loss=True,
-                    return_outputs=True,
+                    return_outputs=False,
                 )
 
                 if outputs is None:
                     # Reconfiguration due to failure is done.
-                    dataloader_iter = iter(dataloader)
-                    continue
+                    model, optimizer, dataloader = engine.reconfigure(
+                        model, optimizer, dataloader
+                    )
+                    logger.warning("Reconfiguration is done. Restarting training.")
+                    break
 
                 if is_pp_last_stage:
                     loss = outputs["loss"]

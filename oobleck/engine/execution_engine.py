@@ -1,6 +1,6 @@
 import itertools
 import math
-from concurrent.futures import ThreadPoolExecutor
+import time
 from threading import Thread
 from typing import Any, Callable, Iterator
 
@@ -182,19 +182,12 @@ class ExecutionEngine:
         using the set of pipeline templates.
         This function is called in such a case.
         """
-        all_process_groups = [dist.GroupMember.WORLD] + list(
-            distributed_c10d._pg_map.values()
-        )
+        pg = dist.GroupMember.WORLD._get_backend(torch.device("cuda"))
+        if isinstance(pg, distributed_c10d._ProcessGroupWrapper):
+            pg = pg.wrapped_pg
 
-        def destroy_pg(pg: dist.ProcessGroup):
-            try:
-                dist.destroy_process_group(pg)
-            except Exception:
-                pass
-
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            executor.map(lambda pg: destroy_pg(pg), all_process_groups)
-            executor.shutdown(wait=True)
+        assert isinstance(pg, dist.ProcessGroupNCCL)
+        pg._shutdown()
 
     def execute(
         self,
@@ -208,6 +201,7 @@ class ExecutionEngine:
         if self.need_reconfiguration:
             while self.notification_receiver_thread.is_alive():
                 logger.info("Waiting for removing old torch.distributed to finish.")
+                time.sleep(1)
             return None
 
         if getattr(dataloader_iterator, "invalidated", False):
@@ -236,10 +230,16 @@ class ExecutionEngine:
                 return_loss=return_loss,
                 return_outputs=return_outputs,
             )
-        except ValueError as e:
-            if not str(e).startswith("Default process group"):
+        except Exception as e:
+            logger.warning(f"e: {e}")
+            logger.warning(f"str(e): {str(e)}")
+            if not (
+                str(e).startswith("Default process group")
+                or str(e).startswith("Connection closed")
+            ):
                 raise
 
+            logger.warning("Reconfiguration is needed.")
             # Failure happens and WORLD process group has been destroyed.
             setattr(dataloader_iterator, "invalidated", True)
             return None
