@@ -145,7 +145,7 @@ class Agent:
         )
 
         os.environ["TORCH_NCCL_USE_COMM_NONBLOCKING"] = "1"
-        os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+        os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "0"
         for gpu_index, rank in enumerate(ranks):
             logger.info(f"Launching worker {rank} (GPU: {gpu_index})...")
 
