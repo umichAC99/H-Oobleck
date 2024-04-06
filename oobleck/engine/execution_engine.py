@@ -1,12 +1,14 @@
 import itertools
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 from typing import Any, Callable, Iterator
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from colossalai.accelerator import get_accelerator
 from colossalai.booster import Booster
 from colossalai.shardformer.policies.auto_policy import _fullname
 from loguru import logger
@@ -182,12 +184,22 @@ class ExecutionEngine:
         using the set of pipeline templates.
         This function is called in such a case.
         """
-        pg = dist.GroupMember.WORLD._get_backend(torch.device("cuda"))
-        if isinstance(pg, distributed_c10d._ProcessGroupWrapper):
-            pg = pg.wrapped_pg
+        logger.warning("Reconfiguration: shutting down all process groups.")
 
-        assert isinstance(pg, dist.ProcessGroupNCCL)
-        pg._shutdown()
+        device = get_accelerator().get_current_device()
+        all_pgs = list(distributed_c10d._pg_map.keys())
+        all_pgs = [pg._get_backend(device) for pg in all_pgs]
+        all_pgs = [
+            pg.wrapped_pg
+            if isinstance(pg, distributed_c10d._ProcessGroupWrapper)
+            else pg
+            for pg in all_pgs
+        ]
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            executor.map(lambda pg: pg._shutdown(), all_pgs)
+
+        dist.destroy_process_group(dist.GroupMember.WORLD)
 
     def execute(
         self,
@@ -202,6 +214,7 @@ class ExecutionEngine:
             while self.notification_receiver_thread.is_alive():
                 logger.info("Waiting for removing old torch.distributed to finish.")
                 time.sleep(1)
+
             return None
 
         if getattr(dataloader_iterator, "invalidated", False):
@@ -230,16 +243,8 @@ class ExecutionEngine:
                 return_loss=return_loss,
                 return_outputs=return_outputs,
             )
-        except Exception as e:
-            logger.warning(f"e: {e}")
-            logger.warning(f"str(e): {str(e)}")
-            if not (
-                str(e).startswith("Default process group")
-                or str(e).startswith("Connection closed")
-            ):
-                raise
-
-            logger.warning("Reconfiguration is needed.")
+        except dist.DistError as e:
+            logger.warning(f"DistError caught: {str(e)}. Reconfiguration is needed.")
             # Failure happens and WORLD process group has been destroyed.
             setattr(dataloader_iterator, "invalidated", True)
             return None
@@ -250,6 +255,7 @@ class ExecutionEngine:
         model, optimizer, dataloader, _ = self.plugin.reconfigure(
             self.pipeline_templates, model, optimizer, dataloader
         )
+
         self.need_reconfiguration = False
         logger.info("Reconfiguration is done.")
         return model, optimizer, dataloader
