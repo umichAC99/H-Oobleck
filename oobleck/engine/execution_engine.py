@@ -101,7 +101,9 @@ class ExecutionEngine:
         )
 
         profile_dataloder = DataLoader(
-            dataloader.dataset, batch_size=self.plugin.microbatch_size
+            dataloader.dataset,
+            batch_size=self.plugin.microbatch_size,
+            collate_fn=dataloader.collate_fn,
         )
         inputs = next(iter(profile_dataloder))
         profiler.init_profile(inputs)

@@ -266,7 +266,9 @@ class ModelProfiler:
             event.record()
             module.to("cpu")
 
-        def backward_pre_hook(module_name, module: nn.Module, grad_output):
+        modules_to_offload: list[tuple[str, torch.nn.Module]] = []
+
+        def backward_pre_hook(module_name: str, module: nn.Module, grad_output):
             module.to("cuda")
             profile_data[module_name].memory[EventTiming.BACKWARD_START] = (
                 torch.cuda.memory_allocated()
@@ -275,12 +277,19 @@ class ModelProfiler:
             event.record()
 
         def backward_hook(module_name, module: nn.Module, grad_input, grad_output):
-            profile_data[module_name].memory[EventTiming.BACKWARD_END] = (
-                torch.cuda.memory_allocated()
-            )
             event = profile_data[module_name].events[EventTiming.BACKWARD_END]
             event.record()
-            module.to("cpu")
+
+            profile_data[module_name].memory[EventTiming.BACKWARD_END] = profile_data[
+                module_name
+            ].memory[EventTiming.BACKWARD_START] + sum(
+                p.numel() * p.element_size() for p in module.parameters()
+            )
+
+            for _, m in modules_to_offload:
+                m.to("cpu")
+            modules_to_offload.clear()
+            modules_to_offload.append((module_name, module))
 
         # Move inputs to cuda
         for name in inputs.keys():
@@ -309,18 +318,24 @@ class ModelProfiler:
         should_continue: bool = True
 
         while should_continue:
+            for param in model.parameters():
+                param.grad = None
+
             logger.debug("Iterating until overflow solved...")
             outputs = model(**inputs)
             optimizer.backward(outputs.loss)
             torch.cuda.synchronize()
+
+            modules_to_offload.clear()
+            for param in model.parameters():
+                param.data = param.data.to("cpu")
+                param.grad.data = param.grad.data.to("cpu")
 
             if (
                 mixed_precision is None
                 or not optimizer.mixed_precision.should_skip_step()
             ):
                 should_continue = False
-                for param in model.parameters():
-                    param.grad.data = param.grad.to("cpu")
 
                 for layer_name in layers:
                     profile_data[layer_name].memory[
@@ -337,7 +352,10 @@ class ModelProfiler:
                 )
                 for layer_name in layers:
                     module = ModelProfiler.get_module_by_name(model, layer_name)
-                    for p in module.parameters():
+                    for param_name, p in module.named_parameters():
+                        if f"{layer_name}.{param_name}" in model._tied_weights_keys:
+                            continue
+
                         if precision in ["fp16", "bf16"]:
                             optim_param_index_id = optim_param_info["id2param"][
                                 num_parameters
@@ -361,8 +379,6 @@ class ModelProfiler:
                         num_parameters += 1
 
             optimizer.zero_grad()
-            for param in model.parameters():
-                param.grad = None
 
         logger.debug("Profiler finished.")
 
