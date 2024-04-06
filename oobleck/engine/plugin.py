@@ -12,9 +12,11 @@ import torch.nn as nn
 from colossalai.accelerator import get_accelerator
 from colossalai.amp.naive_amp.mixed_precision_optimizer import MixedPrecisionOptimizer
 from colossalai.booster.plugin.hybrid_parallel_plugin import (
+    TP_AXIS,
     HybridParallelAMPOptimizer,
     HybridParallelNaiveOptimizer,
 )
+from colossalai.shardformer.layer.parallel_module import ParallelModule
 from loguru import logger
 from oobleck_colossalai import (
     HeterogeneousDataLoader,
@@ -226,7 +228,6 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
             configuration_engine.world_size, num_layers, dtype=torch.bool, device=device
         )
         dist.all_gather_into_tensor(new_layers_per_rank, new_my_layers)
-        del new_my_layers
 
         """
         Missing layer transfer based on new pipeline configuration
@@ -288,13 +289,14 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
                 )
                 raise RuntimeError(f"No one holds the layer: {layers[layer_index]}!")
 
+            module = layer_modules[layers[layer_index]]
+
             for rank_need_layer in ranks:
                 if not layer_holders:
                     # Empty holder "here" means that all holders is consumed and has a job.
                     # Add more jobs to each holder.
                     layer_holders = get_layer_holders()
 
-                module = layer_modules[layers[layer_index]]
                 sender_rank = layer_holders.pop(0)
                 if configuration_engine.rank == rank_need_layer:
                     for (
@@ -400,6 +402,21 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
 
                         dist.send(size, rank_need_layer)
                         dist.send(tensor, rank_need_layer)
+
+        my_layers = [
+            layers[index] for index, has_layer in enumerate(new_my_layers) if has_layer
+        ]
+
+        for layer in my_layers:
+            module = layer_modules[layer]
+            # Replace process group in ParallelModules
+            tp_group = new_pg_mesh.get_group_along_axis(TP_AXIS)
+            for submodule in module.modules():
+                if isinstance(submodule, ParallelModule):
+                    for attr_name in dir(submodule):
+                        attr = getattr(submodule, attr_name)
+                        if isinstance(attr, dist.ProcessGroup):
+                            setattr(submodule, attr_name, tp_group)
 
         for param_info_key, items in removes_from_param_info.items():
             for item in items:
