@@ -2,6 +2,7 @@ import multiprocessing
 import os
 from argparse import REMAINDER
 from dataclasses import dataclass
+from multiprocessing.connection import Connection
 from multiprocessing.context import SpawnContext, SpawnProcess
 from pathlib import Path
 from typing import Any
@@ -71,7 +72,7 @@ def run():
     )
 
     context: SpawnContext = multiprocessing.get_context("spawn")
-    processes: list[tuple[SpawnProcess, multiprocessing.Pipe]] = []
+    processes: list[tuple[SpawnProcess, Connection]] = []
 
     dist_info: list[HostInfo] = [
         HostInfo("localhost", launch_args.num_gpus_per_agent, i)
