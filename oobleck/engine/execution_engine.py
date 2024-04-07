@@ -198,10 +198,26 @@ class ExecutionEngine:
             for pg in all_pgs
         ]
 
-        with ThreadPoolExecutor(max_workers=16) as executor:
+        with ThreadPoolExecutor(max_workers=len(all_pgs)) as executor:
             executor.map(lambda pg: pg._shutdown(), all_pgs)
 
-        dist.destroy_process_group(dist.GroupMember.WORLD)
+        try:
+            dist.destroy_process_group(dist.GroupMember.WORLD)
+        except Exception:
+            pass
+        finally:
+            # If distributed_c10d says GroupMember.WORLD is None
+            # To make sure, clean up internal data structure again
+            distributed_c10d._update_default_pg(None)
+            distributed_c10d._world.pg_map.clear()
+            distributed_c10d._world.pg_names.clear()
+            distributed_c10d._world.pg_group_ranks.clear()
+            distributed_c10d._world.pg_backend_config.clear()
+            distributed_c10d._world.pg_to_tag.clear()
+            distributed_c10d._world.tags_to_pg.clear()
+            distributed_c10d._world.pg_coalesce_state.clear()
+            distributed_c10d._world.pg_default_device.clear()
+            distributed_c10d._world.group_count = 0
 
     def execute(
         self,
@@ -213,10 +229,10 @@ class ExecutionEngine:
         return_outputs: bool = False,
     ) -> dict[str, Any] | None:
         if self.need_reconfiguration:
-            while self.notification_receiver_thread.is_alive():
-                logger.info("Waiting for removing old torch.distributed to finish.")
-                time.sleep(1)
-
+            logger.warning(
+                "Reconfiguration is needed. Should call reconfigure() first."
+            )
+            self.notification_receiver_thread.join()
             return None
 
         if getattr(dataloader_iterator, "invalidated", False):
@@ -249,11 +265,19 @@ class ExecutionEngine:
             logger.warning(f"DistError caught: {str(e)}. Reconfiguration is needed.")
             # Failure happens and WORLD process group has been destroyed.
             setattr(dataloader_iterator, "invalidated", True)
+
             return None
 
     def reconfigure(
         self, model: nn.Module, optimizer: Optimizer, dataloader: DataLoader
     ) -> tuple[nn.Module, Optimizer, DataLoader]:
+        logger.info("Waiting for failure notification watcher to finish.")
+        self.notification_receiver_thread.join()
+
+        logger.info("Start reconfiguration in 5 seconds...")
+        time.sleep(5)
+
+        assert not dist.is_initialized()
         model, optimizer, dataloader, _ = self.plugin.reconfigure(
             self.pipeline_templates, model, optimizer, dataloader
         )
