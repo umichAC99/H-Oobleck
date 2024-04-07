@@ -354,5 +354,22 @@ class TestOobleckReconfiguration4RanksClass(OobleckReconfigurationClassBase):
         checkpoint_io.load_optimizer(optimizer, optim_json_path.as_posix())
 
 
+class TestOobleckReconfigurationTensorParallelClass(OobleckReconfigurationClassBase):
+    num_hosts: int = 4
+    tp_size: int = 2
+    backend = "gloo"
+
+    @parametrize("hosts_to_fail", [[1234], [1235], [1236], [1237]])
+    def test_reconfiguration_pass(self, hosts_to_fail: list[int]):
+        plugin, model, optimizer, dataloader = self.prepare(
+            [template_2stages, template_2stages]
+        )
+
+        model, optimizer, dataloader = self.do_reconfigure(
+            hosts_to_fail, plugin, model, optimizer, dataloader
+        )
+
+
 instantiate_parametrized_tests(TestOobleckReconfiguration3RanksClass)
 instantiate_parametrized_tests(TestOobleckReconfiguration4RanksClass)
+instantiate_parametrized_tests(TestOobleckReconfigurationTensorParallelClass)

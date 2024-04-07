@@ -1,5 +1,6 @@
 import itertools
 import math
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
@@ -41,6 +42,10 @@ class ExecutionEngine:
         plugin: OobleckPlugin,
         **booster_kwargs,
     ):
+        assert os.environ.get("TORCH_NCCL_ASYNC_ERROR_HANDLING", None) == "0", (
+            "Please set TORCH_NCCL_ASYNC_ERROR_HANDLING=0. "
+            "Otherwise it is not possible to handle NCCL failure."
+        )
         assert (
             not dist.is_initialized()
         ), "Distributed environment must not be initialized."

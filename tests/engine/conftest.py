@@ -49,6 +49,7 @@ class OobleckMultiprocessTestBase(MultiProcessTestCase):
     def setUp(self):
         super().setUp()
         initialize_temp_directories()
+        os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "0"
         self._spawn_processes()
 
     def tearDown(self):

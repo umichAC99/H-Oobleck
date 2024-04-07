@@ -169,7 +169,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
         num_layers = len(layers)
 
         # Backup old attributes for reconfiguration before resetting
-        old_pg_mesh = copy.deepcopy(self.pg_mesh.mesh)
+        old_pg_mesh: np.ndarray = copy.deepcopy(self.pg_mesh.mesh)
         old_rank_map = copy.deepcopy(configuration_engine.rank_map)
 
         old_my_layers = torch.tensor(
@@ -190,11 +190,43 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
         gc.collect()
         configuration_engine.init_distributed()
 
+        def all_gather_layers_per_rank(
+            data: torch.Tensor, device: torch.device
+        ) -> dict[tuple[int], np.ndarray]:
+            if dist.get_backend() == "gloo":
+                data_list = [
+                    torch.empty_like(data)
+                    for _ in range(configuration_engine.world_size)
+                ]
+                dist.all_gather(data_list, data)
+                data_list = torch.stack(data_list)
+            else:
+                data_list = torch.empty(
+                    configuration_engine.world_size,
+                    *data.shape,
+                    device=device,
+                    dtype=data.dtype,
+                )
+                dist.all_gather_into_tensor(data_list, data)
+
+            data_list = data_list.numpy(force=True)
+            result = {}
+            for i in range(
+                0,
+                configuration_engine.world_size,
+                self.shard_config.tensor_parallel_size,
+            ):
+                ranks = range(i, i + self.shard_config.tensor_parallel_size)
+                assert all(
+                    np.array_equal(data_list[i], data_list[i + tp_index])
+                    for tp_index in range(self.shard_config.tensor_parallel_size)
+                ), f"Data mismatch between ranks in the same tensor parallel group: {ranks}."
+                result[tuple(ranks)] = data_list[i]
+
+            return result
+
         # each tensor indicates which layers are held by each (new) rank
-        old_layers_per_rank = torch.zeros(
-            configuration_engine.world_size, num_layers, dtype=torch.bool, device=device
-        )
-        dist.all_gather_into_tensor(old_layers_per_rank, old_my_layers)
+        old_layers_per_ranks = all_gather_layers_per_rank(old_my_layers, device)
         del old_my_layers
 
         # Prepare layer transfer before setting new pipelines
@@ -224,20 +256,17 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
             device=device,
         )
 
-        new_layers_per_rank = torch.zeros(
-            configuration_engine.world_size, num_layers, dtype=torch.bool, device=device
-        )
-        dist.all_gather_into_tensor(new_layers_per_rank, new_my_layers)
+        new_layers_per_ranks = all_gather_layers_per_rank(new_my_layers, device)
 
         """
         Missing layer transfer based on new pipeline configuration
-        old_layers_per_rank (torch.Tensor[world_size, num_layers]):
-            For each rank, indicates which layers are held by the rank.
-            True if the rank holds the layer, False otherwise.
-            world_size is the size after failures, and ranks are newly assigned ones.
-        new_layers_per_rank (torch.Tensor[world_size, num_layers]):
-            For each rank, indicates which layers should be held by the rank.
-            True if the rank should hold the layer, False if should not.
+        old_layers_per_dp_rank (numpy.ndarray[dp_size, num_layers]):
+            For each dp rank, indicates which layers are held by the replica.
+            True if the dp group holds the layer, False otherwise.
+            dp_size is the size after failures which is newly assigned.
+        new_layers_per_dp_rank (numpy.ndarray[dp_size, num_layers]):
+            For each dp rank, indicates which layers should be held by the replica.
+            True if the dp group should hold the layer, False if should not.
 
         1. Calculate required layers (layers that are now need but not held)
         2. For each required layer, find a rank that holds the layer
@@ -248,12 +277,13 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
         """
 
         # Calculate required layers (layers that are now need but not held)
-        # layer_index -> list of ranks
-        layers_required_by_rank: dict[int, list[int]] = defaultdict(list)
-        for index, has_layer in np.ndenumerate(old_layers_per_rank.numpy(force=True)):
-            if not has_layer and new_layers_per_rank[index]:
-                rank, layer_index = index
-                layers_required_by_rank[layer_index].append(rank)
+        # layer_index -> list of tuples of ranks (each tuple includes ranks per tensor parallel group)
+        # Even if tensor parallelism is not used, it is a tuple with one element.
+        layers_required_by_ranks: dict[int, list[tuple[int]]] = defaultdict(list)
+        for ranks, has_layers in old_layers_per_ranks.items():
+            for layer_index, has_layer in enumerate(has_layers):
+                if not has_layer and new_layers_per_ranks[ranks][layer_index]:
+                    layers_required_by_ranks[layer_index].append(ranks)
 
         layer_modules: dict[str, nn.Module] = {
             layer_name: module
@@ -262,12 +292,12 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
             if name == layer_name
         }
 
-        def get_layer_holders() -> list[int]:
-            layer_holders = []
-            for rank, has_layer in enumerate(old_layers_per_rank[:, layer_index]):
-                if has_layer:
-                    layer_holders.append(rank)
-            return layer_holders
+        def get_layer_holder_ranks(layer_index: int) -> list[int]:
+            layer_holder_ranks = []
+            for ranks, has_layers in old_layers_per_ranks.items():
+                if has_layers[layer_index]:
+                    layer_holder_ranks.append(ranks)
+            return layer_holder_ranks
 
         adds_to_param_info: dict[str, dict] = {
             "param2id": {},
@@ -280,9 +310,9 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
             "param2shape": [],
         }
 
-        for layer_index, ranks in layers_required_by_rank.items():
-            layer_holders = get_layer_holders()
-            if not layer_holders:
+        for layer_index, ranks in layers_required_by_ranks.items():
+            layer_holder_ranks = get_layer_holder_ranks(layer_index)
+            if not layer_holder_ranks:
                 logger.error(
                     f"Currently no rank has layer: {layers[layer_index]}. "
                     "Please rerun training from last checkpoint."
@@ -291,14 +321,17 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
 
             module = layer_modules[layers[layer_index]]
 
-            for rank_need_layer in ranks:
-                if not layer_holders:
+            for ranks_need_layer in ranks:
+                if not layer_holder_ranks:
                     # Empty holder "here" means that all holders is consumed and has a job.
                     # Add more jobs to each holder.
-                    layer_holders = get_layer_holders()
+                    layer_holder_ranks = get_layer_holder_ranks(layer_index)
 
-                sender_rank = layer_holders.pop(0)
-                if configuration_engine.rank == rank_need_layer:
+                sender_ranks = layer_holder_ranks.pop(0)
+                if configuration_engine.rank in ranks_need_layer:
+                    sender_rank = sender_ranks[
+                        ranks_need_layer.index(configuration_engine.rank)
+                    ]
                     for (
                         submodule,
                         name,
@@ -373,7 +406,10 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
                         adds_to_param_info["id2param"][optim_param_index] = id(p)
                         adds_to_param_info["param2shape"][id(p)] = p.shape
 
-                elif sender_rank == configuration_engine.rank:
+                elif configuration_engine.rank in sender_ranks:
+                    rank_need_layer = ranks_need_layer[
+                        sender_ranks.index(configuration_engine.rank)
+                    ]
                     for name, param in module.named_parameters():
                         # Find master weights
                         master_param = (
@@ -433,8 +469,16 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
 
         # free no-longer necessary parameter here
         # TODO: must create _buffer_placeholders and _parameter_placeholders
-        old_layers = old_layers_per_rank.numpy(force=True)[configuration_engine.rank, :]
-        new_layers = new_layers_per_rank.numpy(force=True)[configuration_engine.rank, :]
+        old_layers = next(
+            layers
+            for ranks, layers in old_layers_per_ranks.items()
+            if configuration_engine.rank in ranks
+        )
+        new_layers = next(
+            layers
+            for ranks, layers in new_layers_per_ranks.items()
+            if configuration_engine.rank in ranks
+        )
         for index, (old_layer, new_layer) in enumerate(zip(old_layers, new_layers)):
             if old_layer and not new_layer:
                 module = layer_modules[layers[index]]
