@@ -403,19 +403,24 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
                         dist.send(size, rank_need_layer)
                         dist.send(tensor, rank_need_layer)
 
+        # Update internal process group in ParallelModules
         my_layers = [
             layers[index] for index, has_layer in enumerate(new_my_layers) if has_layer
         ]
+        tp_group = new_pg_mesh.get_group_along_axis(TP_AXIS)
 
         for layer in my_layers:
             module = layer_modules[layer]
             # Replace process group in ParallelModules
-            tp_group = new_pg_mesh.get_group_along_axis(TP_AXIS)
+
             for submodule in module.modules():
                 if isinstance(submodule, ParallelModule):
                     for attr_name in dir(submodule):
                         attr = getattr(submodule, attr_name)
                         if isinstance(attr, dist.ProcessGroup):
+                            logger.debug(
+                                f"Replacing process group {attr} with {tp_group}"
+                            )
                             setattr(submodule, attr_name, tp_group)
 
         for param_info_key, items in removes_from_param_info.items():
