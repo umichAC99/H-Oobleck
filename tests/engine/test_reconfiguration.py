@@ -492,8 +492,6 @@ class TestOobleckReconfigurationTensorParallelClass(OobleckReconfigurationClassB
         # Check params shape are identical across ranks
         parameter_sanity_check(my_layers, layer_modules)
 
-        print("hi")
-
 
 instantiate_parametrized_tests(TestOobleckReconfiguration3RanksClass)
 instantiate_parametrized_tests(TestOobleckReconfiguration4RanksClass)
