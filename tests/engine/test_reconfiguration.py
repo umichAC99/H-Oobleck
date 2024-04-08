@@ -7,6 +7,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 import torch.distributed as dist
+from colossalai.accelerator import CpuAccelerator
 from colossalai.checkpoint_io.utils import save_state_dict_shards
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from oobleck_colossalai.pipeline_template import PipelineTemplate
@@ -365,9 +366,28 @@ class TestOobleckReconfigurationTensorParallelClass(OobleckReconfigurationClassB
             [template_2stages, template_2stages]
         )
 
-        model, optimizer, dataloader = self.do_reconfigure(
-            hosts_to_fail, plugin, model, optimizer, dataloader
-        )
+        def all_gather_into_tensor_in_gloo(
+            output_tensor: torch.Tensor, input_tensor: torch.Tensor
+        ):
+            data_list = [
+                torch.empty_like(input_tensor) for _ in range(dist.get_world_size())
+            ]
+            dist.all_gather(data_list, input_tensor)
+            output_tensor.data = torch.stack(data_list)
+
+        with (
+            patch(
+                "oobleck.engine.plugin.get_accelerator", return_value=CpuAccelerator()
+            ),
+            patch.object(
+                dist,
+                "all_gather_into_tensor",
+                new=all_gather_into_tensor_in_gloo,
+            ),
+        ):
+            model, optimizer, dataloader = self.do_reconfigure(
+                hosts_to_fail, plugin, model, optimizer, dataloader
+            )
 
 
 instantiate_parametrized_tests(TestOobleckReconfiguration3RanksClass)

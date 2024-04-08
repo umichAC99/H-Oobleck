@@ -1,5 +1,4 @@
 import copy
-import gc
 import io
 import itertools
 from collections import Counter, defaultdict
@@ -187,27 +186,18 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
         configuration_engine.get_host_update()
         del self.pg_mesh
         self.pg_mesh = None
-        gc.collect()
         configuration_engine.init_distributed()
 
         def all_gather_layers_per_rank(
             data: torch.Tensor, device: torch.device
         ) -> dict[tuple[int], np.ndarray]:
-            if dist.get_backend() == "gloo":
-                data_list = [
-                    torch.empty_like(data)
-                    for _ in range(configuration_engine.world_size)
-                ]
-                dist.all_gather(data_list, data)
-                data_list = torch.stack(data_list)
-            else:
-                data_list = torch.empty(
-                    configuration_engine.world_size,
-                    *data.shape,
-                    device=device,
-                    dtype=data.dtype,
-                )
-                dist.all_gather_into_tensor(data_list, data)
+            data_list = torch.empty(
+                configuration_engine.world_size,
+                *data.shape,
+                device=device,
+                dtype=data.dtype,
+            )
+            dist.all_gather_into_tensor(data_list, data)
 
             data_list = data_list.numpy(force=True)
             result = {}
@@ -216,7 +206,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
                 configuration_engine.world_size,
                 self.shard_config.tensor_parallel_size,
             ):
-                ranks = range(i, i + self.shard_config.tensor_parallel_size)
+                ranks = list(range(i, i + self.shard_config.tensor_parallel_size))
                 assert all(
                     np.array_equal(data_list[i], data_list[i + tp_index])
                     for tp_index in range(self.shard_config.tensor_parallel_size)
@@ -292,7 +282,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
             if name == layer_name
         }
 
-        def get_layer_holder_ranks(layer_index: int) -> list[int]:
+        def get_layer_holder_ranks(layer_index: int) -> list[tuple[int]]:
             layer_holder_ranks = []
             for ranks, has_layers in old_layers_per_ranks.items():
                 if has_layers[layer_index]:
@@ -329,6 +319,7 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
 
                 sender_ranks = layer_holder_ranks.pop(0)
                 if configuration_engine.rank in ranks_need_layer:
+                    # Find the corresponding tensor parallel rank in sender_ranks
                     sender_rank = sender_ranks[
                         ranks_need_layer.index(configuration_engine.rank)
                     ]
@@ -357,20 +348,13 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
                             size.item(), dtype=torch.uint8, device=device
                         )
                         dist.recv(tensor, sender_rank)
-                        buff = io.BytesIO(tensor.cpu().numpy())
+                        buff = io.BytesIO(tensor.numpy(force=True))
                         tensor: dict[str, tuple[dict, torch.Tensor]] = torch.load(
                             buff, map_location=device
                         )
 
                         states: dict[str, torch.Tensor] = tensor["states"]
                         master_tensor: torch.Tensor = tensor["parameter"]
-
-                        # Check whether shape is correct
-                        assert master_tensor.shape == placeholder.shape, (
-                            f"{name} Shape mismatch between placeholder and parameter. "
-                            f"received parameter shape: {master_tensor.shape}, "
-                            f"placeholder shape: {placeholder.shape}"
-                        )
 
                         p = torch.nn.Parameter(
                             master_tensor.to(dtype=model.mixed_precision)
@@ -407,10 +391,12 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
                         adds_to_param_info["param2shape"][id(p)] = p.shape
 
                 elif configuration_engine.rank in sender_ranks:
+                    # Find the corresponding tensor parallel rank in ranks_need_layer
                     rank_need_layer = ranks_need_layer[
                         sender_ranks.index(configuration_engine.rank)
                     ]
                     for name, param in module.named_parameters():
+                        buff = io.BytesIO()
                         # Find master weights
                         master_param = (
                             optimizer.working_to_master_map[param]
@@ -418,11 +404,15 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
                             else param
                         )
 
-                        # Pickle optimizer state
-                        buff = io.BytesIO()
+                        try:
+                            # Pickle optimizer state
+                            states = optimizer.optim.state[master_param]
+                        except KeyError:
+                            states = None
+
                         torch.save(
                             {
-                                "states": optimizer.optim.state[master_param],
+                                "states": states,
                                 "parameter": master_param,
                             },
                             buff,
