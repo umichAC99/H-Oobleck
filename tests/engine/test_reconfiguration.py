@@ -8,9 +8,11 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from colossalai.accelerator import CpuAccelerator
+from colossalai.booster.plugin.hybrid_parallel_plugin import PP_AXIS
 from colossalai.checkpoint_io.utils import save_state_dict_shards
 from colossalai.interface import ModelWrapper, OptimizerWrapper
 from oobleck_colossalai.pipeline_template import PipelineTemplate
+from oobleck_colossalai.shardformer.shard.shardformer import ModelSharder
 from torch.optim import Adam
 from torch.testing._internal.common_distributed import (
     requires_nccl,
@@ -366,6 +368,91 @@ class TestOobleckReconfigurationTensorParallelClass(OobleckReconfigurationClassB
             [template_2stages, template_2stages]
         )
 
+        layers = template_1stage.modules_per_stage[0]
+        num_layers = template_1stage.num_layers
+        layer_modules: dict[str, torch.nn.Module] = {
+            layer_name: module
+            for name, module in model.module.named_modules()
+            for layer_name in layers
+            if name == layer_name
+        }
+        my_layers = np.array(
+            [
+                True
+                if index
+                in [coord[PP_AXIS] for coord in plugin.stage_manager.pg_mesh.coords]
+                else False
+                for index in range(num_layers)
+            ]
+        )
+
+        def placeholders_sanity_check(
+            has_layers: np.ndarray, layers: dict[str, torch.nn.Module]
+        ):
+            """
+            Check if placeholders are properly placed
+            If this rank has a layer, it should not have any placeholders.
+            If this rank doesn't have a layer, it should not have any parameters
+            unless the layer has no parameters.
+            """
+            for has_layer, module in zip(has_layers, layers.values()):
+                placeholders = list(
+                    ModelSharder.buffer_placeholders(
+                        module, delete_placeholders_after=False
+                    )
+                )
+
+                if has_layer:
+                    assert len(placeholders) == 0
+                else:
+                    # if there is no parameter, placeholder can be empty even it this rank
+                    # doesn't have a layer
+                    assert len(placeholders) > 0 or len(list(module.parameters())) == 0
+
+        def parameter_sanity_check(
+            has_layers: np.ndarray, layers: dict[str, torch.nn.Module]
+        ):
+            """
+            Check if parameters across the rank have the same shape
+            """
+            has_layers = torch.tensor(has_layers)
+            has_layers_per_rank = [
+                torch.empty_like(has_layers) for _ in range(dist.get_world_size())
+            ]
+            dist.all_gather(has_layers_per_rank, has_layers)
+            has_layers_per_rank: np.ndarray = torch.stack(has_layers_per_rank).numpy()
+
+            for layer_index, layer_name in enumerate(layers.keys()):
+                param_shapes = [
+                    param.shape for param in layers[layer_name].parameters()
+                ]
+                param_shapes_per_rank: list[torch.Size] = [
+                    None for _ in range(dist.get_world_size())
+                ]
+                dist.all_gather_object(param_shapes_per_rank, param_shapes)
+                has_layer_per_rank = has_layers_per_rank[:, layer_index]
+
+                # if not has layer, param_shapes should be empty
+                assert all(
+                    len(param_shapes_per_rank[rank]) == 0
+                    for rank, has_layer in enumerate(has_layer_per_rank)
+                    if not has_layer
+                )
+
+                # For all ranks that have the layer, check if the shape is the same
+                param_shapes_per_rank = [
+                    (rank, param_shape)
+                    for rank, param_shape in enumerate(param_shapes_per_rank)
+                    if len(param_shape) > 0
+                ]
+                assert all(
+                    param_shape[1] == param_shapes_per_rank[0][1]
+                    for param_shape in param_shapes_per_rank
+                )
+
+        placeholders_sanity_check(my_layers, layer_modules)
+        parameter_sanity_check(my_layers, layer_modules)
+
         def all_gather_into_tensor_in_gloo(
             output_tensor: torch.Tensor, input_tensor: torch.Tensor
         ):
@@ -388,6 +475,24 @@ class TestOobleckReconfigurationTensorParallelClass(OobleckReconfigurationClassB
             model, optimizer, dataloader = self.do_reconfigure(
                 hosts_to_fail, plugin, model, optimizer, dataloader
             )
+
+        my_layers = torch.tensor(
+            [
+                True
+                if index
+                in [coord[PP_AXIS] for coord in plugin.stage_manager.pg_mesh.coords]
+                else False
+                for index in range(num_layers)
+            ]
+        )
+
+        # Check new placeholders/parameters are properly placed
+        placeholders_sanity_check(my_layers, layer_modules)
+
+        # Check params shape are identical across ranks
+        parameter_sanity_check(my_layers, layer_modules)
+
+        print("hi")
 
 
 instantiate_parametrized_tests(TestOobleckReconfiguration3RanksClass)
