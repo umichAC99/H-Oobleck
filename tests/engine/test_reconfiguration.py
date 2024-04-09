@@ -476,7 +476,7 @@ class TestOobleckReconfigurationTensorParallelClass(OobleckReconfigurationClassB
                 hosts_to_fail, plugin, model, optimizer, dataloader
             )
 
-        my_layers = torch.tensor(
+        my_layers = np.array(
             [
                 True
                 if index

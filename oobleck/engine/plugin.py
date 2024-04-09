@@ -356,6 +356,13 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
                         states: dict[str, torch.Tensor] = tensor["states"]
                         master_tensor: torch.Tensor = tensor["parameter"]
 
+                        # Check whether shape is correct
+                        assert master_tensor.shape == placeholder.shape, (
+                            f"{name} Shape mismatch between placeholder and parameter. "
+                            f"received parameter shape: {master_tensor.shape}, "
+                            f"placeholder shape: {placeholder.shape}"
+                        )
+
                         p = torch.nn.Parameter(
                             master_tensor.to(dtype=model.mixed_precision)
                             if isinstance(optimizer, MixedPrecisionOptimizer)
