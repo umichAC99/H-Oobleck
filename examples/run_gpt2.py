@@ -1,15 +1,19 @@
+import functools
 from dataclasses import dataclass
 
+import datasets
 import simple_parsing
-from data_builder import GLUEDataBuilder
 from loguru import logger
+from oobleck_colossalai.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from transformers import (
     AutoConfig,
-    GPT2ForSequenceClassification,
+    GPT2LMHeadModel,
+    GPT2TokenizerFast,
     PretrainedConfig,
+    PreTrainedTokenizer,
     get_linear_schedule_with_warmup,
 )
 
@@ -23,6 +27,22 @@ class TrainingArguments:
     num_epoch: int = 3
     warmup_faction: float = 0.1
     tp_size: int = 1
+
+
+def tokenize_batch_for_pretrain(
+    batch, tokenizer: PreTrainedTokenizer | None = None, max_length: int = 2048
+):
+    texts = [sample["text"] for sample in batch]
+    data = tokenizer(
+        texts,
+        return_tensors="pt",
+        padding="max_length",
+        truncation=True,
+        max_length=max_length,
+    )
+    data = {k: v.cuda() for k, v in data.items()}
+    data["labels"] = data["input_ids"].clone()
+    return data
 
 
 def main():
@@ -41,14 +61,24 @@ def main():
     engine = ExecutionEngine(plugin)
 
     config: PretrainedConfig = AutoConfig.from_pretrained(args.model_name_or_path)
-    config.pad_token_id = config.eos_token_id
-    model = GPT2ForSequenceClassification.from_pretrained(
-        args.model_name_or_path, config=config
-    )
+    model = GPT2LMHeadModel.from_pretrained(args.model_name_or_path, config=config)
+    model.gradient_checkpointing_enable()
 
     # Prepare dataloader
-    data_builder = GLUEDataBuilder(args.model_name_or_path, plugin, task_name="mrpc")
-    dataloader = data_builder.dataloader()
+    tokenizer = GPT2TokenizerFast.from_pretrained(args.model_name_or_path)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    dataset = datasets.load_dataset("wikitext", "wikitext-2-raw-v1")["train"]
+    dataloader: HeterogeneousDataLoader = plugin.prepare_dataloader(
+        dataset,
+        shuffle=True,
+        drop_last=True,
+        collate_fn=functools.partial(
+            tokenize_batch_for_pretrain,
+            tokenizer=tokenizer,
+            max_length=model.config.max_position_embeddings,
+        ),
+    )
 
     # optimizer
     optimizer = Adam(model.parameters())
@@ -62,7 +92,7 @@ def main():
         num_training_steps=total_steps,
     )
 
-    model, optimizer, _, _, lr_scheduler = engine.prepare(
+    model, optimizer, _, dataloader, lr_scheduler = engine.prepare(
         model,
         criterion=lambda outputs, inputs: outputs.loss,
         dataloader=dataloader,
@@ -101,7 +131,8 @@ def main():
                         model, optimizer, dataloader
                     )
                     logger.warning("Reconfiguration is done. Restarting training.")
-                    break
+                    dataloader_iter = iter(dataloader)
+                    continue
 
                 if is_pp_last_stage:
                     loss = outputs["loss"]

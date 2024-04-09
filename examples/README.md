@@ -39,7 +39,8 @@ that specifies nodes to be used for training. The master daemon accesses each da
 > 2. Run a ssh daemon in each container (port doesn't matter) without dedicated network namespaces, and use port forwarding to map in-container-ssh ports to different ports in the host.
 
 > An executable of `python` should be located in the same path of that in the master node and oobleck should be properly configured in all remote nodes.
-
+> 
+> A script must be in the same path on all nodes.
 
 Now, **use `oobleck.elastic.run` module.** If you want to run `run_gpt2.py`:
 ```bash

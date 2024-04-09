@@ -171,6 +171,10 @@ class MultiNodeAgentRunner:
                     ) as out_stream,
                     conn.cd(os.getcwd()),
                 ):
+                    if not debug:
+                        logger.info(
+                            f"Agent {agent_index} output will be saved to {(out_stream.name)}."
+                        )
                     conn.run(
                         cmd,
                         hide=True,
