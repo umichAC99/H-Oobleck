@@ -396,18 +396,15 @@ class TestOobleckReconfigurationTensorParallelClass(OobleckReconfigurationClassB
             unless the layer has no parameters.
             """
             for has_layer, module in zip(has_layers, layers.values()):
-                placeholders = list(
-                    ModelSharder.buffer_placeholders(
-                        module, delete_placeholders_after=False
-                    )
-                )
-
                 if has_layer:
-                    assert len(placeholders) == 0
+                    assert not ModelSharder.has_placeholders(module)
                 else:
                     # if there is no parameter, placeholder can be empty even it this rank
                     # doesn't have a layer
-                    assert len(placeholders) > 0 or len(list(module.parameters())) == 0
+                    assert (
+                        ModelSharder.has_placeholders(module)
+                        or len(list(module.parameters())) == 0
+                    )
 
         def parameter_sanity_check(
             has_layers: np.ndarray, layers: dict[str, torch.nn.Module]
