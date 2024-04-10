@@ -1,6 +1,7 @@
 import itertools
 import math
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 from typing import Any, Callable, Iterator
@@ -289,6 +290,9 @@ class ExecutionEngine:
     ) -> tuple[nn.Module, Optimizer, DataLoader]:
         logger.info("Waiting for failure notification watcher to finish.")
         self.notification_receiver_thread.join()
+
+        logger.info("Start reconfiguration in 5 seconds...")
+        time.sleep(5)
 
         assert not dist.is_initialized()
         model, optimizer, dataloader, _ = self.plugin.reconfigure(
