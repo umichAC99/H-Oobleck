@@ -5,7 +5,7 @@ from pathlib import Path
 import grpc
 import pytest
 
-from oobleck.elastic import master_service_pb2_grpc
+from oobleck.elastic import master_service_pb2_grpc, run
 from oobleck.elastic.run import (
     HostInfo,
     LaunchArguments,
@@ -14,9 +14,9 @@ from oobleck.elastic.run import (
 )
 
 fake_host_info = [
-    HostInfo("127.0.0.1", 2, 1234),
-    HostInfo("127.0.0.2", 2, 1234),
-    HostInfo("127.0.0.3", 2, 1234),
+    HostInfo("127.0.0.1", "0,1", 1234),
+    HostInfo("127.0.0.2", "0,1", 1234),
+    HostInfo("127.0.0.3", "0,1", 1234),
 ]
 
 
@@ -33,7 +33,7 @@ def server(
     fake_launch_args.hostfile.write_text(
         "\n".join(
             list(
-                f"{host.ip} slots={host.slots} port={host.port}"
+                f"{host.ip} slots={len(host.devices.split(','))} devices={host.devices} port={host.port}"
                 for host in fake_host_info
             )
         )
@@ -54,13 +54,13 @@ def server(
     )
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    run.agent_list = [(host, None) for host in fake_host_info]
     service = MasterService(
         fake_script_args,
-        fake_host_info,
         multiprocessing.get_context("spawn").Condition(),
     )
     master_service_pb2_grpc.add_OobleckMasterServicer_to_server(service, server)
-    port = server.add_insecure_port(f"0.0.0.0:0")
+    port = server.add_insecure_port("0.0.0.0:0")
     server.start()
 
     yield fake_launch_args, fake_script_args, service, port

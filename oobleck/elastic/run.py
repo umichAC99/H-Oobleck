@@ -58,14 +58,18 @@ class ScriptArguments:
 @dataclass
 class HostInfo:
     ip: str
-    slots: int
+    devices: str
     port: int
 
     def __eq__(self, other: HostInfo) -> bool:
-        return self.ip == other.ip and self.port == other.port
+        return (
+            self.ip == other.ip
+            and self.devices == other.devices
+            and self.port == other.port
+        )
 
     def __hash__(self) -> int:
-        return hash((self.ip, self.port))
+        return hash((self.ip, self.devices, self.port))
 
     @staticmethod
     def fetch_hostfile(hostfile_path: Path) -> list[HostInfo]:
@@ -73,16 +77,24 @@ class HostInfo:
         Parse the hostfile (MPI style) and return a list of HostInfo objects.
 
         A hostfile should look like:
-        worker-0 slots=2 port=22
+        worker-0 slots=2 devices=0,1 port=22
+        worker-0 slots=2 devices=2,3 port=22
         worker-1 slots=2 port=1234
         worker-1 slots=2 port=1235
 
-        The `slots` and `port` fields are optional.
-        A hostname can be duplicated with different port, if agents are meant to be
-        run on different Docker containers on the same host.
+        The `devices` and `port` fields are optional.
+
+        You must specify the same number of slots to all agents.
+
+        You can optionally specify the `devices` field to specify which GPUs
+        should be used by the agent on the host.
+        This will allow you to run multiple agents on the same host, with different GPUs.
+        If not specified, `slots` number of GPUs starting from 0 will be used.
+
+        If you use Docker containers to split GPUs on the same host,
+        you can specify different port numbers for each container.
         """
         hosts: list[HostInfo] = []
-        first_slots = None
         with hostfile_path.open("r") as f:
             for line in f.readlines():
                 parts = line.split()
@@ -90,25 +102,40 @@ class HostInfo:
                 if not parts:
                     continue
 
-                ip, slots, port = socket.gethostbyname(parts[0]), None, None
+                ip, slots, devices, port = (
+                    socket.gethostbyname(parts[0]),
+                    None,
+                    None,
+                    None,
+                )
+                first_slots = None
                 for part in parts[1:]:
                     if part.startswith("slots="):
                         slots = int(part.split("=")[1])
+
                         if first_slots is None:
                             first_slots = slots
-                        else:
-                            assert (
-                                slots == first_slots
-                            ), "All hosts must have the same number of slots"
+
+                        if first_slots != slots:
+                            raise ValueError(
+                                "All agents must have the same number of slots."
+                            )
+                    elif part.startswith("devices="):
+                        devices = part.split("=")[1]
                     elif part.startswith("port="):
                         port = int(part.split("=")[1])
 
                 if slots is None:
-                    slots = 1
+                    raise ValueError(
+                        "The `slots` field must be specified for every agent."
+                    )
+
+                if devices is None:
+                    devices = ",".join(str(i) for i in range(slots))
                 if port is None:
                     port = 22
 
-                hosts.append(HostInfo(ip, slots, port))
+                hosts.append(HostInfo(ip, devices, port))
 
         logger.debug(f"Hosts: {hosts}")
 
@@ -249,13 +276,10 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
     def __init__(
         self,
         script_args: ScriptArguments,
-        hostinfo: list[HostInfo],
         disconnect_condition: Condition,
     ):
         self.script_args = script_args
-        self.hostinfo = hostinfo
         self.disconnect_condition = disconnect_condition
-        self.clients = []
         self.master_port = 0
 
     def GetDistInfo(
@@ -266,9 +290,9 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
         return master_service_pb2.DistInfo(
             hosts=[
                 master_service_pb2.HostInfo(
-                    ip=host.ip, slots=host.slots, port=host.port
+                    ip=host.ip, devices=host.devices, port=host.port
                 )
-                for host in self.hostinfo
+                for host, _ in agent_list
             ]
         )
 
@@ -309,7 +333,7 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
             yield master_service_pb2.DistInfo(
                 hosts=[
                     master_service_pb2.HostInfo(
-                        ip=host.ip, slots=host.slots, port=host.port
+                        ip=host.ip, devices=host.devices, port=host.port
                     )
                     for host, _ in agent_list
                 ]
@@ -344,7 +368,7 @@ def serve():
 
     server = grpc.server(ThreadPoolExecutor(max_workers=None))
     disconnect_condition = multiprocessing.get_context("spawn").Condition()
-    service = MasterService(script_args, hostinfo, disconnect_condition)
+    service = MasterService(script_args, disconnect_condition)
     master_service_pb2_grpc.add_OobleckMasterServicer_to_server(service, server)
     port = server.add_insecure_port(f"0.0.0.0:{launch_args.master_service_port}")
     server.start()

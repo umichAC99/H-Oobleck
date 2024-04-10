@@ -106,7 +106,7 @@ class Agent:
         # Get distributed information and code from the master
         dist_info: DistInfo = stub.GetDistInfo(Empty())
         self.dist_info = list(
-            HostInfo(host.ip, host.slots, host.port) for host in dist_info.hosts
+            HostInfo(host.ip, host.devices, host.port) for host in dist_info.hosts
         )
         training_args: CodeInfo = stub.GetCode(Empty())
         self.script: Path = Path(training_args.path)
@@ -127,7 +127,7 @@ class Agent:
         for dist_info in stub.WatchReconfigurationNotification(Empty()):
             dist_info = cast(DistInfo, dist_info)
             dist_info = [
-                HostInfo(host.ip, host.slots, host.port) for host in dist_info.hosts
+                HostInfo(host.ip, host.devices, host.port) for host in dist_info.hosts
             ]
             self.notify_reconfiguration_to_workers(dist_info)
 
@@ -138,7 +138,11 @@ class Agent:
         """Launch worker processes."""
         ctx: SpawnContext = multiprocessing.get_context("spawn")
 
-        tensor_parallel_size = self.dist_info[0].slots
+        gpu_indices: list[int] = list(
+            int(dev) for dev in self.dist_info[self.agent_index].devices.split(",")
+        )
+
+        tensor_parallel_size = len(gpu_indices)
         ranks = range(
             self.agent_index * tensor_parallel_size,
             (self.agent_index + 1) * tensor_parallel_size,
@@ -146,7 +150,7 @@ class Agent:
 
         os.environ["TORCH_NCCL_USE_COMM_NONBLOCKING"] = "1"
         os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "0"
-        for gpu_index, rank in enumerate(ranks):
+        for gpu_index, rank in zip(gpu_indices, ranks):
             logger.info(f"Launching worker {rank} (GPU: {gpu_index})...")
 
             pipe, child_pipe = ctx.Pipe()
@@ -157,7 +161,7 @@ class Agent:
                 args=(
                     child_pipe,
                     self.agent_index,
-                    gpu_index,
+                    gpu_index % tensor_parallel_size,
                     self.tag,
                     self.base_dir,
                     self.script,
@@ -193,6 +197,11 @@ class Agent:
 
         for worker in self.workers:
             worker.pipe.send(port)
+
+        # Master rank will send another message to the agent to reset the port
+        if self.agent_index == 0:
+            self.workers[0].pipe.recv()
+            self.stub.SetMasterRankPort(PortInfo(port=0))
 
     def watch_worker_exit(self):
         """Watch worker exit and restart it.

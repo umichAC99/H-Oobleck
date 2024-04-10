@@ -1,5 +1,6 @@
 import runpy
 import threading
+from concurrent.futures import Future
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -8,7 +9,7 @@ import grpc
 from google.protobuf.empty_pb2 import Empty
 from pytest_mock import MockerFixture
 
-from oobleck.elastic import master_service_pb2, master_service_pb2_grpc
+from oobleck.elastic import master_service_pb2, master_service_pb2_grpc, run
 from oobleck.elastic.run import (
     HostInfo,
     LaunchArguments,
@@ -28,13 +29,13 @@ def test_get_dist_info(
 ):
     fake_master_args, _, _, port = server
     stub = get_stub(port)
-    dist_info = stub.GetDistInfo(Empty())
+    dist_info: master_service_pb2.DistInfo = stub.GetDistInfo(Empty())
 
     fake_dist_info = HostInfo.fetch_hostfile(fake_master_args.hostfile)
     assert len(dist_info.hosts) == len(fake_dist_info)
     for host, fake_host in zip(dist_info.hosts, fake_dist_info):
         assert host.ip == fake_host.ip
-        assert host.slots == fake_host.slots
+        assert host.devices == fake_host.devices
         assert host.port == fake_host.port
 
 
@@ -83,14 +84,14 @@ def test_receive_reconfiguration_notification(
 
     # Manipulate dist info in service
     with service.disconnect_condition:
-        service.hostinfo.pop(-1)
+        run.agent_list.pop(-1)
         service.disconnect_condition.notify_all()
 
     dist_info: master_service_pb2.DistInfo = queue.get(timeout=10)
     assert len(dist_info.hosts) == 2
-    for host, fake_host in zip(dist_info.hosts, service.hostinfo[:-1]):
+    for host, (fake_host, _) in zip(dist_info.hosts, run.agent_list[:-1]):
         assert host.ip == fake_host.ip
-        assert host.slots == fake_host.slots
+        assert host.devices == fake_host.devices
         assert host.port == fake_host.port
 
 
@@ -102,10 +103,11 @@ def test_run_agents(
     hosts = HostInfo.fetch_hostfile(args.hostfile)
     disconnect_condition = None
 
-    mock_context = mocker.Mock()
-    mock_process = mocker.Mock()
-    mock_context.Process.return_value = mock_process
-    mocker.patch("multiprocessing.get_context", return_value=mock_context)
+    future = Future()
+    future.set_result(None)
+    mock_executor = mocker.patch(
+        "oobleck.elastic.run.ProcessPoolExecutor.submit", return_value=future
+    )
 
     runner = MultiNodeAgentRunner(
         disconnect_condition=disconnect_condition,
@@ -114,19 +116,21 @@ def test_run_agents(
         tag=args.tag,
         base_dir=args.base_dir,
     )
+    run.agent_list.clear()
     runner.run()
 
-    assert mock_process.start.call_count == len(hosts)
+    assert mock_executor.call_count == len(hosts)
+
     for agent_index, (call_args, host) in enumerate(
-        zip(mock_process.call_args_list, hosts)
+        zip(mock_executor.call_args_list, hosts)
     ):
         call_args = call_args[0]
-        agent_output_dir = args.base_dir / f"agent{agent_index}.log"
         assert call_args == (
             runner.run_on_nodes,
             agent_index,
-            disconnect_condition,
             host,
             port,
-            agent_output_dir,
+            args.tag,
+            args.base_dir,
+            args.debug,
         )
