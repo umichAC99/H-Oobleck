@@ -1,7 +1,6 @@
 import itertools
 import math
 import os
-import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 from typing import Any, Callable, Iterator
@@ -246,7 +245,6 @@ class ExecutionEngine:
             if dist.is_initialized():
                 # If torch.distributed is still initialized, this means
                 # the configuration was not immediate and should be done now.
-                dist.barrier()
                 torch.cuda.synchronize()
                 self.on_receive_reconfiguration_notifiation()
             return None
@@ -291,9 +289,6 @@ class ExecutionEngine:
     ) -> tuple[nn.Module, Optimizer, DataLoader]:
         logger.info("Waiting for failure notification watcher to finish.")
         self.notification_receiver_thread.join()
-
-        logger.info("Start reconfiguration in 5 seconds...")
-        time.sleep(5)
 
         assert not dist.is_initialized()
         model, optimizer, dataloader, _ = self.plugin.reconfigure(
