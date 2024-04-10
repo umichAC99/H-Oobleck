@@ -14,7 +14,7 @@ maintainers = [
 dependencies = [
     "torch",
     "transformers>=4.36.0",
-    "simple_parsing",
+    "click",
     "loguru",
     "fabric",
     # "oobleck-colossalai",
@@ -38,6 +38,9 @@ dev = [
     "grpcio-tools",
     "datasets",
 ]
+
+[project.scripts]
+oobleck = "oobleck.cli:main"
 
 [tool.ruff]
 # Never enforce `E501` (line length violations).

@@ -1,23 +1,21 @@
 from __future__ import annotations
 
 import multiprocessing
-import os
 import socket
 import sys
-from argparse import REMAINDER
 from concurrent import futures
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
+from enum import Enum
 from multiprocessing.context import SpawnProcess
 from multiprocessing.synchronize import Condition
 from pathlib import Path
 
+import click
 import fabric
 import grpc
 from google.protobuf import empty_pb2
 from loguru import logger
-from simple_parsing import ArgumentParser
-from simple_parsing.helpers import field
 
 from oobleck.elastic import master_service_pb2, master_service_pb2_grpc
 
@@ -42,17 +40,23 @@ class LaunchArguments:
     # A tag to identify this run
     tag: str
     # Port for master gRPC service
-    master_service_port: int = 0
+    master_service_port: int
     # Oobleck root directory to store logs and profiles.
-    base_dir: Path = Path("/tmp/oobleck")
+    base_dir: Path
     # Print agent's ssh outputs to stdout, instead of files
-    debug: bool = field(default=False, action="store_true")
+    debug: bool
 
 
 @dataclass
 class ScriptArguments:
-    training_script: Path = field(positional=True)
-    training_script_args: list[str] = field(positional=True, nargs=REMAINDER)
+    training_script: Path
+    training_script_args: list[str]
+
+
+class HostStatus(Enum):
+    up = 0
+    killed = 1
+    terminating = 2
 
 
 @dataclass
@@ -60,6 +64,7 @@ class HostInfo:
     ip: str
     devices: str
     port: int
+    status: HostStatus = HostStatus.up
 
     def __eq__(self, other: HostInfo) -> bool:
         return (
@@ -190,24 +195,21 @@ class MultiNodeAgentRunner:
 
                 logger.debug(f"Connected to {host.ip}:{host.port}. Executing: {cmd}")
 
-                with (
-                    (
-                        sys.stderr
-                        if debug
-                        else (base_dir / tag / f"agent{agent_index}.log").open("w")
-                    ) as out_stream,
-                    conn.cd(os.getcwd()),
-                ):
-                    if not debug:
-                        logger.info(
-                            f"Agent {agent_index} output will be saved to {(out_stream.name)}."
-                        )
-                    conn.run(
-                        cmd,
-                        hide=True,
-                        out_stream=out_stream,
-                        err_stream=out_stream,
+                if not debug:
+                    out_stream = (base_dir / tag / f"agent{agent_index}.log").open("w")
+                    logger.info(
+                        f"Agent {agent_index} output will be saved to {(out_stream.name)}."
                     )
+                else:
+                    out_stream = sys.stderr
+
+                conn.run(
+                    cmd,
+                    hide=True,
+                    out_stream=out_stream,
+                    err_stream=out_stream,
+                )
+
         except Exception as e:
             logger.warning(f"[Agent {agent_index}] SSH disconnected: {e}")
             raise
@@ -253,7 +255,7 @@ class MultiNodeAgentRunner:
                     )
                     agent_list.remove(value)
 
-                logger.debug("Remained agents: {}", agent_list)
+                logger.debug("Remaining agents: {}", agent_list)
 
                 if reconfiguration_needed:
                     with self.disconnect_condition:
@@ -290,7 +292,10 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
         return master_service_pb2.DistInfo(
             hosts=[
                 master_service_pb2.HostInfo(
-                    ip=host.ip, devices=host.devices, port=host.port
+                    ip=host.ip,
+                    devices=host.devices,
+                    port=host.port,
+                    status=host.status.name,
                 )
                 for host, _ in agent_list
             ]
@@ -321,6 +326,20 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
     ) -> master_service_pb2.PortInfo:
         return master_service_pb2.PortInfo(port=self.master_port)
 
+    def KillAgent(
+        self, request: master_service_pb2.AgentInfo, context: grpc.RpcContext
+    ) -> empty_pb2.Empty:
+        agent_index = request.agent_index
+        host, _ = agent_list[agent_index]
+
+        host.status = HostStatus.terminating
+        logger.info(f"Terminating agent {agent_index} on {host.ip}:{host.port}")
+
+        with self.disconnect_condition:
+            self.disconnect_condition.notify_all()
+
+        return empty_pb2.Empty()
+
     def WatchReconfigurationNotification(
         self,
         request: empty_pb2.Empty,
@@ -333,29 +352,61 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
             yield master_service_pb2.DistInfo(
                 hosts=[
                     master_service_pb2.HostInfo(
-                        ip=host.ip, devices=host.devices, port=host.port
+                        ip=host.ip,
+                        devices=host.devices,
+                        port=host.port,
+                        status=host.status.name,
                     )
                     for host, _ in agent_list
                 ]
             )
 
 
-def serve():
-    parser = ArgumentParser()
-    parser.add_arguments(LaunchArguments, dest="launch")
-
-    # positional arguments
-    parser.add_argument(
-        "training_script",
-        type=Path,
-        help="Full path to the training script to be launched in parallel, "
-        "followed by all the arguments for the training script.",
+@click.command(context_settings={"ignore_unknown_options": True})
+@click.option("--hostfile", type=Path, help="Path to the hostfile.")
+@click.option("--tag", type=str, help="A tag to identify this run.")
+@click.option(
+    "--master_service_port", type=int, default=0, help="Port for master gRPC service."
+)
+@click.option(
+    "--base_dir",
+    type=Path,
+    help="Oobleck root directory store logs and profiles.",
+    default=Path("/tmp/oobleck"),
+)
+@click.option(
+    "--debug",
+    type=bool,
+    is_flag=True,
+    help="Print agent's ssh outputs to stderr, instead of files.",
+    default=False,
+)
+@click.argument("training_script", type=Path)
+@click.argument("training_script_args", nargs=-1, type=click.UNPROCESSED)
+def serve(
+    hostfile: Path,
+    tag: str,
+    master_service_port: int,
+    base_dir: Path,
+    debug: bool,
+    training_script: Path,
+    training_script_args: list[str],
+):
+    """
+    training_script: Full path to the training script to be launched in parallel,
+    followed by all the arguments for the training script.
+    """
+    launch_args = LaunchArguments(
+        hostfile=hostfile,
+        tag=tag,
+        master_service_port=master_service_port,
+        base_dir=base_dir,
+        debug=debug,
     )
-    parser.add_argument("training_script_args", nargs=REMAINDER)
-
-    args = parser.parse_args()
-    launch_args: LaunchArguments = args.launch
-    script_args = ScriptArguments(args.training_script, args.training_script_args)
+    script_args = ScriptArguments(
+        training_script=training_script,
+        training_script_args=training_script_args,
+    )
 
     logger.info(f"Dist arguments: {launch_args}")
     logger.info(f"Script arguments: {script_args}")

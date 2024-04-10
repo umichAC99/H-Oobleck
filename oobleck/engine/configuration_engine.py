@@ -3,14 +3,13 @@ from __future__ import annotations
 import datetime
 import itertools
 import os
-import time
 from multiprocessing.connection import Connection
 from pathlib import Path
 
 import torch.distributed as dist
 from loguru import logger
 
-from oobleck.elastic.run import HostInfo
+from oobleck.elastic.run import HostInfo, HostStatus
 
 
 class ConfigurationEngine:
@@ -88,11 +87,26 @@ class ConfigurationEngine:
         Get host update from the agent process.
         """
         my_agent = self.dist_info[self.agent_index]
-
         new_dist_info: list[HostInfo] = self.pipe.recv()
 
-        self.dist_info = new_dist_info
-        self.agent_index = new_dist_info.index(my_agent)
+        assert not any(
+            host.status == HostStatus.killed for host in new_dist_info
+        ), "Worker should not see any killed agent status."
+
+        agent_index = new_dist_info.index(my_agent)
+        if new_dist_info[agent_index].status == HostStatus.terminating:
+            # This process will be terminated after the iteration.
+            logger.info(
+                f"Worker {self.local_rank} in agent {self.agent_index} terminating..."
+            )
+            os._exit(0)
+
+        self.dist_info = [
+            host_info
+            for host_info in new_dist_info
+            if host_info.status == HostStatus.up
+        ]
+        self.agent_index = self.dist_info.index(my_agent)
 
         self.rank_map = {
             host: list(range(i * len(gpu_indices), (i + 1) * len(gpu_indices)))
@@ -123,15 +137,24 @@ class ConfigurationEngine:
         """
         return self.agent_index == 0 and self.local_rank == 0
 
-    def recv_reconfiguration_notification(self):
+    def recv_reconfiguration_notification(self) -> bool:
+        """
+        Block this thread until the agent sends a reconfiguration message.
+
+        Returns:
+            True if training requests immediate reconfiguration.
+            False if some agents wll be terminated after the iteration.
+        """
         try:
             message = self.pipe.recv()
-            assert (
-                message == "reconfigure"
-            ), f"Unexpected reconfiguration message: {message}"
+            if message == "immediate_reconfigure":
+                return True
+            elif message == "reconfigure":
+                return False
+
+            raise ValueError(f"Unexpected reconfiguration message: {message}")
         except Exception:
             # Corresponding agent died. This process should also die.
-            time.sleep(60)
             os._exit(1)
 
     def send_distributed_port(self, port: int):

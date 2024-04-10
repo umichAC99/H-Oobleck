@@ -1,5 +1,6 @@
 import sys
 import time
+from copy import deepcopy
 from typing import Counter
 from unittest.mock import patch
 
@@ -31,7 +32,7 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
-from oobleck.elastic.run import HostInfo
+from oobleck.elastic.run import HostInfo, HostStatus
 from oobleck.engine.configuration_engine import ConfigurationEngine
 from oobleck.engine.execution_engine import ExecutionEngine
 from oobleck.engine.plugin import OobleckPlugin
@@ -206,6 +207,7 @@ class TestEngineExecutionClass(OobleckEngineTestBase):
             ),
         ],
     )
+    @parametrize("immediate", [True, False])
     @requires_nccl()
     @skip_if_lt_x_gpu(4)
     def test_engine_reconfigure(
@@ -215,6 +217,7 @@ class TestEngineExecutionClass(OobleckEngineTestBase):
         pipelines: list[PipelineTemplate],
         hosts_to_fail: list[int],
         expected_new_pipelines: list[PipelineTemplate],
+        immediate: bool,
     ):
         num_hosts_mock = patch.object(self, "num_hosts", num_hosts)
         tp_size_mock = patch.object(self, "tp_size", tp_size)
@@ -250,24 +253,36 @@ class TestEngineExecutionClass(OobleckEngineTestBase):
         ):
             print(f"Failing the host {configuration_engine.agent_index}...")
             sys.exit(0)
-        else:
+
+        if immediate:
             new_host_info: list[HostInfo] = [
                 host_info
                 for host_info in configuration_engine.dist_info
                 if host_info.port not in hosts_to_fail
             ]
-
+            self.pipe.send("immediate_reconfigure")
+        else:
+            new_host_info: list[HostInfo] = deepcopy(configuration_engine.dist_info)
+            for host_info in new_host_info:
+                if host_info.port in hosts_to_fail:
+                    host_info.status = HostStatus.terminating
             self.pipe.send("reconfigure")
-            self.pipe.send(new_host_info)
+        self.pipe.send(new_host_info)
 
         while engine.notification_receiver_thread.is_alive():
             print("Waiting for the notification receiver thread to terminate...")
             time.sleep(1)
 
         # After thread is terminated, the engine should be reconfigured
-        assert not dist.is_initialized()
         assert engine.need_reconfiguration is True
-        assert self.do_step(engine, model, optimizer, dataloader) is None
+
+        if immediate:
+            assert not dist.is_initialized()
+            assert self.do_step(engine, model, optimizer, dataloader) is None
+        else:
+            assert dist.is_initialized()
+            assert self.do_step(engine, model, optimizer, dataloader) is None
+            assert not dist.is_initialized()
 
         with (
             patch.object(
