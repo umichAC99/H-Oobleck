@@ -117,6 +117,10 @@ class Agent:
             )
             worker.pipe.send(dist_info)
 
+        # If this agent is about to die, don't forward the port
+        if dist_info[self.agent_index].status == HostStatus.terminating:
+            return
+
         self.forward_master_port()
 
     def watch_reconfiguration_notification(self):
@@ -179,6 +183,7 @@ class Agent:
                     self.script,
                     self.script_args,
                 ),
+                daemon=False,
             )
             process.start()
             self.workers.append(Worker(pipe, process))
