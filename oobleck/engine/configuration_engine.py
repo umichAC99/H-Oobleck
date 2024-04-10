@@ -94,8 +94,8 @@ class ConfigurationEngine:
             host.status == HostStatus.killed for host in new_dist_info
         ), "Worker should not see any killed agent status."
 
-        self.agent_index = new_dist_info.index(my_agent)
-        if new_dist_info[self.agent_index].status == HostStatus.terminating:
+        agent_index = new_dist_info.index(my_agent)
+        if new_dist_info[agent_index].status == HostStatus.terminating:
             # This process will be terminated after the iteration.
             logger.info(
                 f"Worker {self.local_rank} in agent {self.agent_index} terminating..."
@@ -107,6 +107,7 @@ class ConfigurationEngine:
             for host_info in new_dist_info
             if host_info.status == HostStatus.up
         ]
+        self.agent_index = self.dist_info.index(my_agent)
 
         self.rank_map = {
             host: list(range(i * len(gpu_indices), (i + 1) * len(gpu_indices)))
