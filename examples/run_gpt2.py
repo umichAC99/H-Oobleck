@@ -16,7 +16,7 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
-from oobleck import ExecutionEngine, OobleckPlugin
+from oobleck.engine import ExecutionEngine, OobleckPlugin
 
 
 def tokenize_batch_for_pretrain(
