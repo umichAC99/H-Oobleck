@@ -140,7 +140,11 @@ class HostInfo:
                 if port is None:
                     port = 22
 
-                hosts.append(HostInfo(ip, devices, port))
+                host_info = HostInfo(ip, devices, port)
+                if any(host == host_info for host in hosts):
+                    raise ValueError(f"Duplicated host: {host_info}")
+
+                hosts.append(host_info)
 
         logger.debug(f"Hosts: {hosts}")
 
