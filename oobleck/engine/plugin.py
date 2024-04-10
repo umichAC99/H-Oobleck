@@ -56,7 +56,8 @@ class OobleckPlugin(HeterogeneousParallelPlugin):
 
         configuration_engine = ConfigurationEngine.get_instance()
         assert all(
-            host.slots == tp_size for host in configuration_engine.dist_info
+            len(host.devices.split(",")) == tp_size
+            for host in configuration_engine.dist_info
         ), f"All agent must have the same worker size {tp_size}."
 
         super().__init__(

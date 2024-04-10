@@ -61,11 +61,12 @@ class ConfigurationEngine:
         dist_info: list[HostInfo] = pipe.recv()
         instance.dist_info = dist_info
 
-        logger.debug(f"dist_info: {dist_info}")
+        logger.debug(f"dist_info: {dist_info}, agent_index: {agent_index}")
 
         instance.rank_map = {
-            host: list(range(i * host.slots, (i + 1) * host.slots))
+            host: list(range(i * len(gpu_indices), (i + 1) * len(gpu_indices)))
             for i, host in enumerate(dist_info)
+            if (gpu_indices := host.devices.split(","))
         }
         my_agent = dist_info[agent_index]
         instance.rank = instance.rank_map[my_agent][instance.local_rank]
@@ -94,8 +95,9 @@ class ConfigurationEngine:
         self.agent_index = new_dist_info.index(my_agent)
 
         self.rank_map = {
-            host: list(range(i * host.slots, (i + 1) * host.slots))
+            host: list(range(i * len(gpu_indices), (i + 1) * len(gpu_indices)))
             for i, host in enumerate(self.dist_info)
+            if (gpu_indices := host.devices.split(","))
         }
         my_agent = self.dist_info[self.agent_index]
         self.rank = self.rank_map[my_agent][self.local_rank]
@@ -106,7 +108,11 @@ class ConfigurationEngine:
 
     @property
     def world_size(self) -> int:
-        return sum(host.slots for host in self.dist_info)
+        if not self.dist_info:
+            return 0
+
+        num_devices = len(self.dist_info[0].devices.split(","))
+        return num_devices * len(self.dist_info)
 
     @property
     def is_master(self) -> bool:

@@ -11,7 +11,7 @@ service OobleckMaster {
 
 message HostInfo {
     string ip = 1;
-    uint32 slots = 2;
+    string devices = 2;
     uint32 port = 3;
 }
 

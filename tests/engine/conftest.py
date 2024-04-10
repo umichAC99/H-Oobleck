@@ -65,7 +65,9 @@ class OobleckMultiprocessTestBase(MultiProcessTestCase):
         # dist info
         pipe.send(
             [
-                HostInfo("127.0.0.1", self.tp_size, 1234 + i)
+                HostInfo(
+                    "127.0.0.1", ",".join(str(i) for i in range(self.tp_size)), 1234 + i
+                )
                 for i in range(self.num_hosts)
             ]
         )
