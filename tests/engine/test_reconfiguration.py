@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from colossalai.accelerator import CpuAccelerator
+from colossalai.amp.naive_amp.mixed_precision_optimizer import MixedPrecisionOptimizer
 from colossalai.booster.plugin.hybrid_parallel_plugin import PP_AXIS
 from colossalai.checkpoint_io.utils import save_state_dict_shards
 from colossalai.interface import ModelWrapper, OptimizerWrapper
@@ -447,8 +448,16 @@ class TestOobleckReconfigurationTensorParallelClass(OobleckReconfigurationClassB
                     for param_shape in param_shapes_per_rank
                 )
 
+        def optimizer_sanity_check(optimizer: OptimizerWrapper):
+            if not isinstance(optimizer, MixedPrecisionOptimizer):
+                return
+
+            for w, m in optimizer.working_to_master_map.items():
+                assert w.shape == m.shape
+
         placeholders_sanity_check(my_layers, layer_modules)
         parameter_sanity_check(my_layers, layer_modules)
+        optimizer_sanity_check(optimizer)
 
         def all_gather_into_tensor_in_gloo(
             output_tensor: torch.Tensor, input_tensor: torch.Tensor
@@ -488,6 +497,8 @@ class TestOobleckReconfigurationTensorParallelClass(OobleckReconfigurationClassB
 
         # Check params shape are identical across ranks
         parameter_sanity_check(my_layers, layer_modules)
+
+        optimizer_sanity_check(optimizer)
 
 
 instantiate_parametrized_tests(TestOobleckReconfiguration3RanksClass)
