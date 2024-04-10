@@ -7,14 +7,16 @@ from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Map
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class HostInfo(_message.Message):
-    __slots__ = ("ip", "devices", "port")
+    __slots__ = ("ip", "devices", "port", "status")
     IP_FIELD_NUMBER: _ClassVar[int]
     DEVICES_FIELD_NUMBER: _ClassVar[int]
     PORT_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
     ip: str
     devices: str
     port: int
-    def __init__(self, ip: _Optional[str] = ..., devices: _Optional[str] = ..., port: _Optional[int] = ...) -> None: ...
+    status: str
+    def __init__(self, ip: _Optional[str] = ..., devices: _Optional[str] = ..., port: _Optional[int] = ..., status: _Optional[str] = ...) -> None: ...
 
 class DistInfo(_message.Message):
     __slots__ = ("hosts",)
@@ -35,3 +37,9 @@ class PortInfo(_message.Message):
     PORT_FIELD_NUMBER: _ClassVar[int]
     port: int
     def __init__(self, port: _Optional[int] = ...) -> None: ...
+
+class AgentInfo(_message.Message):
+    __slots__ = ("agent_index",)
+    AGENT_INDEX_FIELD_NUMBER: _ClassVar[int]
+    agent_index: int
+    def __init__(self, agent_index: _Optional[int] = ...) -> None: ...

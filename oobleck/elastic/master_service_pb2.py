@@ -15,7 +15,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14master_service.proto\x1a\x1bgoogle/protobuf/empty.proto\"5\n\x08HostInfo\x12\n\n\x02ip\x18\x01 \x01(\t\x12\x0f\n\x07\x64\x65vices\x18\x02 \x01(\t\x12\x0c\n\x04port\x18\x03 \x01(\r\"$\n\x08\x44istInfo\x12\x18\n\x05hosts\x18\x01 \x03(\x0b\x32\t.HostInfo\"&\n\x08\x43odeInfo\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0c\n\x04\x61rgs\x18\x02 \x03(\t\"\x18\n\x08PortInfo\x12\x0c\n\x04port\x18\x01 \x01(\r2\xb2\x02\n\rOobleckMaster\x12\x32\n\x0bGetDistInfo\x12\x16.google.protobuf.Empty\x1a\t.DistInfo\"\x00\x12.\n\x07GetCode\x12\x16.google.protobuf.Empty\x1a\t.CodeInfo\"\x00\x12\x38\n\x11SetMasterRankPort\x12\t.PortInfo\x1a\x16.google.protobuf.Empty\"\x00\x12\x38\n\x11GetMasterRankPort\x12\x16.google.protobuf.Empty\x1a\t.PortInfo\"\x00\x12I\n WatchReconfigurationNotification\x12\x16.google.protobuf.Empty\x1a\t.DistInfo\"\x00\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x14master_service.proto\x1a\x1bgoogle/protobuf/empty.proto\"E\n\x08HostInfo\x12\n\n\x02ip\x18\x01 \x01(\t\x12\x0f\n\x07\x64\x65vices\x18\x02 \x01(\t\x12\x0c\n\x04port\x18\x03 \x01(\r\x12\x0e\n\x06status\x18\x04 \x01(\t\"$\n\x08\x44istInfo\x12\x18\n\x05hosts\x18\x01 \x03(\x0b\x32\t.HostInfo\"&\n\x08\x43odeInfo\x12\x0c\n\x04path\x18\x01 \x01(\t\x12\x0c\n\x04\x61rgs\x18\x02 \x03(\t\"\x18\n\x08PortInfo\x12\x0c\n\x04port\x18\x01 \x01(\r\" \n\tAgentInfo\x12\x13\n\x0b\x61gent_index\x18\x01 \x01(\r2\xe5\x02\n\rOobleckMaster\x12\x32\n\x0bGetDistInfo\x12\x16.google.protobuf.Empty\x1a\t.DistInfo\"\x00\x12.\n\x07GetCode\x12\x16.google.protobuf.Empty\x1a\t.CodeInfo\"\x00\x12\x38\n\x11SetMasterRankPort\x12\t.PortInfo\x1a\x16.google.protobuf.Empty\"\x00\x12\x38\n\x11GetMasterRankPort\x12\x16.google.protobuf.Empty\x1a\t.PortInfo\"\x00\x12I\n WatchReconfigurationNotification\x12\x16.google.protobuf.Empty\x1a\t.DistInfo\"\x00\x30\x01\x12\x31\n\tKillAgent\x12\n.AgentInfo\x1a\x16.google.protobuf.Empty\"\x00\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -23,13 +23,15 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'master_service_pb2', _globa
 if _descriptor._USE_C_DESCRIPTORS == False:
   DESCRIPTOR._options = None
   _globals['_HOSTINFO']._serialized_start=53
-  _globals['_HOSTINFO']._serialized_end=106
-  _globals['_DISTINFO']._serialized_start=108
-  _globals['_DISTINFO']._serialized_end=144
-  _globals['_CODEINFO']._serialized_start=146
-  _globals['_CODEINFO']._serialized_end=184
-  _globals['_PORTINFO']._serialized_start=186
-  _globals['_PORTINFO']._serialized_end=210
-  _globals['_OOBLECKMASTER']._serialized_start=213
-  _globals['_OOBLECKMASTER']._serialized_end=519
+  _globals['_HOSTINFO']._serialized_end=122
+  _globals['_DISTINFO']._serialized_start=124
+  _globals['_DISTINFO']._serialized_end=160
+  _globals['_CODEINFO']._serialized_start=162
+  _globals['_CODEINFO']._serialized_end=200
+  _globals['_PORTINFO']._serialized_start=202
+  _globals['_PORTINFO']._serialized_end=226
+  _globals['_AGENTINFO']._serialized_start=228
+  _globals['_AGENTINFO']._serialized_end=260
+  _globals['_OOBLECKMASTER']._serialized_start=263
+  _globals['_OOBLECKMASTER']._serialized_end=620
 # @@protoc_insertion_point(module_scope)

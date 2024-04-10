@@ -4,7 +4,7 @@
 import grpc
 from google.protobuf import empty_pb2 as google_dot_protobuf_dot_empty__pb2
 
-from . import master_service_pb2 as master__service__pb2
+import oobleck.elastic.master_service_pb2 as master__service__pb2
 
 
 class OobleckMasterStub(object):
@@ -41,6 +41,11 @@ class OobleckMasterStub(object):
             request_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
             response_deserializer=master__service__pb2.DistInfo.FromString,
         )
+        self.KillAgent = channel.unary_unary(
+            "/OobleckMaster/KillAgent",
+            request_serializer=master__service__pb2.AgentInfo.SerializeToString,
+            response_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
+        )
 
 
 class OobleckMasterServicer(object):
@@ -76,6 +81,12 @@ class OobleckMasterServicer(object):
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
+    def KillAgent(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
 
 def add_OobleckMasterServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -103,6 +114,11 @@ def add_OobleckMasterServicer_to_server(servicer, server):
             servicer.WatchReconfigurationNotification,
             request_deserializer=google_dot_protobuf_dot_empty__pb2.Empty.FromString,
             response_serializer=master__service__pb2.DistInfo.SerializeToString,
+        ),
+        "KillAgent": grpc.unary_unary_rpc_method_handler(
+            servicer.KillAgent,
+            request_deserializer=master__service__pb2.AgentInfo.FromString,
+            response_serializer=google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
         ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -250,6 +266,35 @@ class OobleckMaster(object):
             "/OobleckMaster/WatchReconfigurationNotification",
             google_dot_protobuf_dot_empty__pb2.Empty.SerializeToString,
             master__service__pb2.DistInfo.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+        )
+
+    @staticmethod
+    def KillAgent(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/OobleckMaster/KillAgent",
+            master__service__pb2.AgentInfo.SerializeToString,
+            google_dot_protobuf_dot_empty__pb2.Empty.FromString,
             options,
             channel_credentials,
             insecure,

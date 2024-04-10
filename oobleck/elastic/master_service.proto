@@ -7,12 +7,14 @@ service OobleckMaster {
     rpc SetMasterRankPort(PortInfo) returns (google.protobuf.Empty) {}
     rpc GetMasterRankPort(google.protobuf.Empty) returns (PortInfo) {}
     rpc WatchReconfigurationNotification(google.protobuf.Empty) returns (stream DistInfo) {}
+    rpc KillAgent(AgentInfo) returns (google.protobuf.Empty) {}
 }
 
 message HostInfo {
     string ip = 1;
     string devices = 2;
     uint32 port = 3;
+    string status = 4;
 }
 
 message DistInfo {
@@ -26,4 +28,8 @@ message CodeInfo {
 
 message PortInfo {
     uint32 port = 1;
+}
+
+message AgentInfo {
+    uint32 agent_index = 1;
 }
