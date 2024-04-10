@@ -4,7 +4,6 @@ import multiprocessing
 import os
 import socket
 import sys
-from argparse import REMAINDER
 from concurrent import futures
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -12,12 +11,11 @@ from multiprocessing.context import SpawnProcess
 from multiprocessing.synchronize import Condition
 from pathlib import Path
 
+import click
 import fabric
 import grpc
 from google.protobuf import empty_pb2
 from loguru import logger
-from simple_parsing import ArgumentParser
-from simple_parsing.helpers import field
 
 from oobleck.elastic import master_service_pb2, master_service_pb2_grpc
 
@@ -42,17 +40,17 @@ class LaunchArguments:
     # A tag to identify this run
     tag: str
     # Port for master gRPC service
-    master_service_port: int = 0
+    master_service_port: int
     # Oobleck root directory to store logs and profiles.
-    base_dir: Path = Path("/tmp/oobleck")
+    base_dir: Path
     # Print agent's ssh outputs to stdout, instead of files
-    debug: bool = field(default=False, action="store_true")
+    debug: bool
 
 
 @dataclass
 class ScriptArguments:
-    training_script: Path = field(positional=True)
-    training_script_args: list[str] = field(positional=True, nargs=REMAINDER)
+    training_script: Path
+    training_script_args: list[str]
 
 
 @dataclass
@@ -340,22 +338,50 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
             )
 
 
-def serve():
-    parser = ArgumentParser()
-    parser.add_arguments(LaunchArguments, dest="launch")
-
-    # positional arguments
-    parser.add_argument(
-        "training_script",
-        type=Path,
-        help="Full path to the training script to be launched in parallel, "
-        "followed by all the arguments for the training script.",
+@click.command(context_settings={"ignore_unknown_options": True})
+@click.option("--hostfile", type=Path, help="Path to the hostfile.")
+@click.option("--tag", type=str, help="A tag to identify this run.")
+@click.option(
+    "--master_service_port", type=int, default=0, help="Port for master gRPC service."
+)
+@click.option(
+    "--base_dir",
+    type=Path,
+    help="Oobleck root directory store logs and profiles.",
+    default=Path("/tmp/oobleck"),
+)
+@click.option(
+    "--debug",
+    type=bool,
+    help="Print agent's ssh outputs to stderr, instead of files.",
+    default=False,
+)
+@click.argument("training_script", type=Path)
+@click.argument("training_script_args", nargs=-1, type=click.UNPROCESSED)
+def serve(
+    hostfile: Path,
+    tag: str,
+    master_service_port: int,
+    base_dir: Path,
+    debug: bool,
+    training_script: Path,
+    training_script_args: list[str],
+):
+    """
+    training_script: Full path to the training script to be launched in parallel,
+    followed by all the arguments for the training script.
+    """
+    launch_args = LaunchArguments(
+        hostfile=hostfile,
+        tag=tag,
+        master_service_port=master_service_port,
+        base_dir=base_dir,
+        debug=debug,
     )
-    parser.add_argument("training_script_args", nargs=REMAINDER)
-
-    args = parser.parse_args()
-    launch_args: LaunchArguments = args.launch
-    script_args = ScriptArguments(args.training_script, args.training_script_args)
+    script_args = ScriptArguments(
+        training_script=training_script,
+        training_script_args=training_script_args,
+    )
 
     logger.info(f"Dist arguments: {launch_args}")
     logger.info(f"Script arguments: {script_args}")

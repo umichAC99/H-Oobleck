@@ -1,8 +1,7 @@
 import functools
-from dataclasses import dataclass
 
+import click
 import datasets
-import simple_parsing
 from loguru import logger
 from oobleck_colossalai.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
 from torch.optim import Adam
@@ -18,15 +17,6 @@ from transformers import (
 )
 
 from oobleck import ExecutionEngine, OobleckPlugin
-
-
-@dataclass
-class TrainingArguments:
-    model_name_or_path: str = "gpt2"
-    global_batch_size: int = 64
-    num_epoch: int = 3
-    warmup_faction: float = 0.1
-    tp_size: int = 1
 
 
 def tokenize_batch_for_pretrain(
@@ -45,13 +35,25 @@ def tokenize_batch_for_pretrain(
     return data
 
 
-def main():
-    args: TrainingArguments = simple_parsing.parse(TrainingArguments)
-
+@click.command
+@click.option(
+    "--model_name_or_path", type=str, default="gpt2", help="Model name or path."
+)
+@click.option("--global_batch_size", type=int, default=96, help="Global batch size.")
+@click.option("--num_epoch", type=int, default=3, help="Number of epochs.")
+@click.option("--warmup_faction", type=float, default=0.1, help="Warmup faction.")
+@click.option("--tp_size", type=int, default=1, help="Tensor parallel degree.")
+def main(
+    model_name_or_path: str,
+    global_batch_size: int,
+    num_epoch: int,
+    warmup_faction: float,
+    tp_size: int,
+):
     plugin = OobleckPlugin(
-        tp_size=args.tp_size,
-        global_batch_size=args.global_batch_size,
-        microbatch_size=8,
+        tp_size=tp_size,
+        global_batch_size=global_batch_size,
+        microbatch_size=2,
         precision="bf16",
         enable_fused_normalization=True,
         enable_flash_attention=True,
@@ -60,12 +62,12 @@ def main():
 
     engine = ExecutionEngine(plugin)
 
-    config: PretrainedConfig = AutoConfig.from_pretrained(args.model_name_or_path)
-    model = GPT2LMHeadModel.from_pretrained(args.model_name_or_path, config=config)
+    config: PretrainedConfig = AutoConfig.from_pretrained(model_name_or_path)
+    model = GPT2LMHeadModel.from_pretrained(model_name_or_path, config=config)
     model.gradient_checkpointing_enable()
 
     # Prepare dataloader
-    tokenizer = GPT2TokenizerFast.from_pretrained(args.model_name_or_path)
+    tokenizer = GPT2TokenizerFast.from_pretrained(model_name_or_path)
     tokenizer.pad_token = tokenizer.eos_token
 
     dataset = datasets.load_dataset("wikitext", "wikitext-2-raw-v1")["train"]
@@ -84,8 +86,8 @@ def main():
     optimizer = Adam(model.parameters())
 
     # lr scheduler
-    total_steps = len(dataloader) * args.num_epoch
-    num_warmup_steps = int(total_steps * args.warmup_faction)
+    total_steps = len(dataloader) * num_epoch
+    num_warmup_steps = int(total_steps * warmup_faction)
     lr_scheduler: LambdaLR = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=num_warmup_steps,
@@ -107,12 +109,12 @@ def main():
 
     is_pp_last_stage = engine.plugin.stage_manager.is_last_stage()
 
-    for epoch in range(args.num_epoch):
+    for epoch in range(num_epoch):
         total_step = len(dataloader)
         dataloader_iter = iter(dataloader)
         with tqdm(
             range(total_step),
-            desc=f"Epoch [{epoch + 1}/{args.num_epoch}]",
+            desc=f"Epoch [{epoch + 1}/{num_epoch}]",
             disable=not (engine.is_master or is_pp_last_stage),
         ) as pbar:
             for _ in pbar:

@@ -14,7 +14,7 @@ maintainers = [
 dependencies = [
     "torch",
     "transformers>=4.36.0",
-    "simple_parsing",
+    "click",
     "loguru",
     "fabric",
     # "oobleck-colossalai",

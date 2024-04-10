@@ -11,8 +11,8 @@ from multiprocessing.context import SpawnContext, SpawnProcess
 from pathlib import Path
 from typing import cast
 
+import click
 import grpc
-import simple_parsing
 import torch
 from google.protobuf.empty_pb2 import Empty
 from loguru import logger
@@ -21,15 +21,6 @@ from oobleck.elastic.master_service_pb2 import CodeInfo, DistInfo, PortInfo
 from oobleck.elastic.master_service_pb2_grpc import OobleckMasterStub
 from oobleck.elastic.run import HostInfo
 from oobleck.engine.configuration_engine import ConfigurationEngine
-
-
-@dataclass
-class OobleckAgentArguments:
-    master_ip: str
-    master_port: int
-    agent_index: int
-    tag: str
-    base_dir: Path
 
 
 @contextmanager
@@ -79,7 +70,7 @@ class Worker:
 
         ConfigurationEngine.create(pipe, agent_index, gpu_index, tag, base_dir)
 
-        argv = [script_path] + script_args
+        argv = [script_path] + list(script_args)
         with temporary_argv(argv):
             runpy.run_path(script_path.as_posix(), run_name="__main__")
 
@@ -124,7 +115,7 @@ class Agent:
         self.forward_master_port()
 
     def watch_reconfiguration_notification(self):
-        for dist_info in stub.WatchReconfigurationNotification(Empty()):
+        for dist_info in self.stub.WatchReconfigurationNotification(Empty()):
             dist_info = cast(DistInfo, dist_info)
             dist_info = [
                 HostInfo(host.ip, host.devices, host.port) for host in dist_info.hosts
@@ -215,16 +206,20 @@ class Agent:
         logger.info("All workers exited.")
 
 
-if __name__ == "__main__":
-    args: OobleckAgentArguments = simple_parsing.parse(
-        OobleckAgentArguments, dest="agent"
-    )
-
+@click.command
+@click.option("--master_ip", type=str, help="Master IP address.")
+@click.option("--master_port", type=int, help="Master port.")
+@click.option("--agent_index", type=int, help="The index of this agent process.")
+@click.option("--tag", type=str, help="A tag to identify this run.")
+@click.option(
+    "--base_dir", type=Path, help="Oobleck root directory store logs and profiles."
+)
+def run(master_ip: str, master_port: int, agent_index: int, tag: str, base_dir: Path):
     # Connect to the master
-    channel = grpc.insecure_channel(f"{args.master_ip}:{args.master_port}")
+    channel = grpc.insecure_channel(f"{master_ip}:{master_port}")
     stub = OobleckMasterStub(channel)
 
-    agent = Agent(args.agent_index, args.tag, args.base_dir, stub)
+    agent = Agent(agent_index, tag, base_dir, stub)
     agent.launch_workers()
 
     def watch_reconfiguration_noti_func():
@@ -235,4 +230,8 @@ if __name__ == "__main__":
     thread.start()
 
     agent.watch_worker_exit()
-    logger.info(f"Agent {args.agent_index} exited.")
+    logger.info(f"Agent {agent_index} exited.")
+
+
+if __name__ == "__main__":
+    run()

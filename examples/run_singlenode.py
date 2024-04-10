@@ -1,15 +1,12 @@
 import multiprocessing
 import os
-from argparse import REMAINDER
-from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.context import SpawnContext, SpawnProcess
 from pathlib import Path
 from typing import Any
 
+import click
 import torch
-from simple_parsing import ArgumentParser
-from simple_parsing.helpers import field
 
 from oobleck.elastic.agent import Worker
 from oobleck.elastic.run import HostInfo
@@ -17,24 +14,6 @@ from oobleck.elastic.run import HostInfo
 """
 Test Oobleck execution on a single node without using fault tolerance.
 """
-
-
-@dataclass
-class LaunchArguments:
-    # A tag to identify this run
-    tag: str
-    # Number of local agents to launch
-    num_agents: int = 1
-    # Number of GPUs per agent. It should be equal to tp_size in the example script.
-    num_gpus_per_agent: int = 1
-    # Oobleck root directory to store profiles.
-    base_dir: Path = Path("/tmp/oobleck")
-
-
-@dataclass
-class ScriptArguments:
-    training_script: Path = field(positional=True)
-    training_script_args: list[str] = field(positional=True, nargs=REMAINDER)
 
 
 def arguments_to_argv(args: dict[str, Any]) -> list[str]:
@@ -48,24 +27,40 @@ def arguments_to_argv(args: dict[str, Any]) -> list[str]:
     return argv
 
 
-def run():
-    parser = ArgumentParser()
-    parser.add_arguments(LaunchArguments, dest="launch")
-
-    parser.add_argument(
-        "training_script",
-        type=Path,
-        help="Full path to the training script to be launched in parallel, "
-        "followed by all the arguments for the training script.",
-    )
-    parser.add_argument("training_script_args", nargs=REMAINDER)
-
-    args = parser.parse_args()
-    launch_args: LaunchArguments = args.launch
-    script_args = ScriptArguments(args.training_script, args.training_script_args)
+@click.command(context_settings={"ignore_unknown_options": True})
+@click.option("--tag", type=str, help="A tag to identify this run.")
+@click.option(
+    "--num_agents", type=int, default=1, help="Number of local agents to launch."
+)
+@click.option(
+    "--num_gpus_per_agent",
+    type=int,
+    default=1,
+    help="Number of GPUs per agent. It should be equal to tp_size in the example script.",
+)
+@click.option(
+    "--base_dir",
+    type=Path,
+    default=Path("/tmp/oobleck"),
+    help="Oobleck root directory to store profiles.",
+)
+@click.argument("training_script", type=Path)
+@click.argument("training_script_args", nargs=-1, type=click.UNPROCESSED)
+def run(
+    tag: str,
+    num_agents: int,
+    num_gpus_per_agent: int,
+    base_dir: Path,
+    training_script: Path,
+    training_script_args: list[str],
+):
+    """
+    training_script: Full path to the training script to be launched in parallel,
+    followed by all the arguments for the training script.
+    """
 
     num_devices = torch.cuda.device_count()
-    num_gpus = launch_args.num_agents * launch_args.num_gpus_per_agent
+    num_gpus = num_agents * num_gpus_per_agent
     assert num_devices >= num_gpus, (
         f"Number of available devices ({num_devices}) is less than "
         f"the number of workers ({num_gpus})"
@@ -75,13 +70,20 @@ def run():
     processes: list[tuple[SpawnProcess, Connection]] = []
 
     dist_info: list[HostInfo] = [
-        HostInfo("localhost", launch_args.num_gpus_per_agent, i)
-        for i in range(launch_args.num_agents)
+        HostInfo(
+            "localhost",
+            ",".join(
+                str(j)
+                for j in range(i * num_gpus_per_agent, (i + 1) * num_gpus_per_agent)
+            ),
+            i,
+        )
+        for i in range(num_agents)
     ]
 
     gpu_index = 0
-    for agent_index in range(launch_args.num_agents):
-        for worker_index in range(launch_args.num_gpus_per_agent):
+    for agent_index in range(num_agents):
+        for worker_index in range(num_gpus_per_agent):
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
             pipe, child_pipe = context.Pipe()
             pipe.send(dist_info)
@@ -92,10 +94,10 @@ def run():
                     child_pipe,
                     agent_index,
                     worker_index,
-                    launch_args.tag,
-                    launch_args.base_dir,
-                    script_args.training_script,
-                    script_args.training_script_args,
+                    tag,
+                    base_dir,
+                    training_script,
+                    training_script_args,
                 ),
             )
             process.start()
