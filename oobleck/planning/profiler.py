@@ -14,8 +14,8 @@ from colossalai.amp.naive_amp.mixed_precision_optimizer import MixedPrecisionOpt
 from colossalai.booster.plugin.hybrid_parallel_plugin import get_param_info
 from colossalai.interface import OptimizerWrapper
 from colossalai.shardformer import ShardConfig, ShardFormer
+from cornstarch.pipeline_template import PipelineTemplate
 from loguru import logger
-from oobleck_colossalai.pipeline_template import PipelineTemplate
 from torch.distributed import FileStore
 from transformers import PretrainedConfig, PreTrainedModel
 

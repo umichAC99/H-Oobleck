@@ -12,12 +12,12 @@ import torch.nn as nn
 from colossalai.accelerator import get_accelerator
 from colossalai.booster import Booster
 from colossalai.shardformer.policies.auto_policy import _fullname
-from loguru import logger
-from oobleck_colossalai.pipeline_template import PipelineTemplate
-from oobleck_colossalai.shardformer.policies.auto_policy import get_autopolicy
-from oobleck_colossalai.shardformer.policies.pipeline_template_policy import (
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.shardformer.policies.auto_policy import get_autopolicy
+from cornstarch.shardformer.policies.pipeline_template_policy import (
     PipelineTemplatePolicyBase,
 )
+from loguru import logger
 from torch.distributed import distributed_c10d
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler

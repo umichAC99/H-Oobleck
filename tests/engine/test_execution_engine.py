@@ -11,7 +11,7 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
     HybridParallelNaiveOptimizer,
 )
 from colossalai.interface import ModelWrapper, OptimizerWrapper
-from oobleck_colossalai import (
+from cornstarch import (
     HeterogeneousDataLoader,
     HeterogeneousParallelModule,
     PipelineTemplate,

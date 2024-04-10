@@ -1,4 +1,4 @@
-from oobleck_colossalai.pipeline_template import PipelineTemplate
+from cornstarch.pipeline_template import PipelineTemplate
 
 from oobleck.planning.profiler import LayerExecutionResult
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from oobleck_colossalai.pipeline_template import PipelineTemplate
+from cornstarch.pipeline_template import PipelineTemplate
 from torch.testing._internal.common_distributed import (
     TEST_SKIPS,
     MultiProcessTestCase,

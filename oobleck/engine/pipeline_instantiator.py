@@ -1,8 +1,8 @@
 from collections import defaultdict
 
 import pulp
+from cornstarch.pipeline_template import PipelineTemplate
 from loguru import logger
-from oobleck_colossalai.pipeline_template import PipelineTemplate
 
 
 class PipelineInstantiator:

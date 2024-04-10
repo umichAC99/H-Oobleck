@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from oobleck_colossalai.shardformer.policies.gpt2 import (
+from cornstarch.shardformer.policies.gpt2 import (
     GPT2Config,
     GPT2ForSequenceClassificationPolicy,
 )

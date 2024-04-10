@@ -47,7 +47,7 @@ fn create_pipeline_templates(
     Python::with_gil(|py| {
         let results = PyDict::new_bound(py);
 
-        let module = PyModule::import_bound(py, "oobleck_colossalai.pipeline_template")?;
+        let module = PyModule::import_bound(py, "cornstarch.pipeline_template")?;
         let class = module.getattr("PipelineTemplate")?.into_py(py);
 
         for num_node in num_nodes {

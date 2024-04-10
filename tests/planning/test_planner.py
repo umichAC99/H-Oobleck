@@ -2,7 +2,7 @@ import itertools
 from pathlib import Path
 
 import pytest
-from oobleck_colossalai.pipeline_template import PipelineTemplate
+from cornstarch.pipeline_template import PipelineTemplate
 
 from oobleck.planning import planner
 from oobleck.planning.profiler import LayerExecutionResult

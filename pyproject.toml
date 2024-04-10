@@ -14,19 +14,16 @@ maintainers = [
 dependencies = [
     "torch",
     "transformers>=4.36.0",
+    "colossalai==0.3.6",
     "click",
     "loguru",
     "fabric",
-    # "oobleck-colossalai",
+    "cornstarch",
     "grpcio",
     "pulp",
 ]
 
 [project.optional-dependencies]
-colossalai-backend = [
-    "colossalai",
-    "xformers",
-]
 dev = [
     "torch>=2.1.0",
     "ruff",

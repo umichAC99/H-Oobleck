@@ -16,18 +16,18 @@ from colossalai.booster.plugin.hybrid_parallel_plugin import (
     HybridParallelNaiveOptimizer,
 )
 from colossalai.shardformer.layer.parallel_module import ParallelModule
-from loguru import logger
-from oobleck_colossalai import (
+from cornstarch import (
     HeterogeneousDataLoader,
     HeterogeneousParallelModule,
     HeterogeneousParallelPlugin,
     PipelineTemplate,
 )
-from oobleck_colossalai.process_group_mesh import (
+from cornstarch.process_group_mesh import (
     PP_AXIS,
     HeterogeneousProcessGroupMesh,
 )
-from oobleck_colossalai.shardformer.shard.shardformer import ModelSharder
+from cornstarch.shardformer.shard.shardformer import ModelSharder
+from loguru import logger
 from torch.optim.lr_scheduler import LRScheduler
 
 from oobleck.engine.configuration_engine import ConfigurationEngine, HostInfo

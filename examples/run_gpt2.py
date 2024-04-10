@@ -2,8 +2,8 @@ import functools
 
 import click
 import datasets
+from cornstarch.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
 from loguru import logger
-from oobleck_colossalai.plugin.heterogeneous_dataloader import HeterogeneousDataLoader
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm

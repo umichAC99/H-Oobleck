@@ -12,8 +12,8 @@ from colossalai.amp.naive_amp.mixed_precision_optimizer import MixedPrecisionOpt
 from colossalai.booster.plugin.hybrid_parallel_plugin import PP_AXIS
 from colossalai.checkpoint_io.utils import save_state_dict_shards
 from colossalai.interface import ModelWrapper, OptimizerWrapper
-from oobleck_colossalai.pipeline_template import PipelineTemplate
-from oobleck_colossalai.shardformer.shard.shardformer import ModelSharder
+from cornstarch.pipeline_template import PipelineTemplate
+from cornstarch.shardformer.shard.shardformer import ModelSharder
 from torch.optim import Adam
 from torch.testing._internal.common_distributed import (
     requires_nccl,
