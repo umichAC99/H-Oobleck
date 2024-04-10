@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import multiprocessing
-import os
 import socket
 import sys
 from concurrent import futures
@@ -196,24 +195,21 @@ class MultiNodeAgentRunner:
 
                 logger.debug(f"Connected to {host.ip}:{host.port}. Executing: {cmd}")
 
-                with (
-                    (
-                        sys.stderr
-                        if debug
-                        else (base_dir / tag / f"agent{agent_index}.log").open("w")
-                    ) as out_stream,
-                    conn.cd(os.getcwd()),
-                ):
-                    if not debug:
-                        logger.info(
-                            f"Agent {agent_index} output will be saved to {(out_stream.name)}."
-                        )
-                    conn.run(
-                        cmd,
-                        hide=True,
-                        out_stream=out_stream,
-                        err_stream=out_stream,
+                if not debug:
+                    out_stream = (base_dir / tag / f"agent{agent_index}.log").open("w")
+                    logger.info(
+                        f"Agent {agent_index} output will be saved to {(out_stream.name)}."
                     )
+                else:
+                    out_stream = sys.stderr
+
+                conn.run(
+                    cmd,
+                    hide=True,
+                    out_stream=out_stream,
+                    err_stream=out_stream,
+                )
+
         except Exception as e:
             logger.warning(f"[Agent {agent_index}] SSH disconnected: {e}")
             raise
@@ -332,7 +328,7 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
 
     def KillAgent(
         self, request: master_service_pb2.AgentInfo, context: grpc.RpcContext
-    ):
+    ) -> empty_pb2.Empty:
         agent_index = request.agent_index
         host, _ = agent_list[agent_index]
 
@@ -341,6 +337,8 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
 
         with self.disconnect_condition:
             self.disconnect_condition.notify_all()
+
+        return empty_pb2.Empty()
 
     def WatchReconfigurationNotification(
         self,
@@ -379,6 +377,7 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
 @click.option(
     "--debug",
     type=bool,
+    is_flag=True,
     help="Print agent's ssh outputs to stderr, instead of files.",
     default=False,
 )
