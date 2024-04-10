@@ -131,7 +131,6 @@ class ConfigurationEngine:
             ), f"Unexpected reconfiguration message: {message}"
         except Exception:
             # Corresponding agent died. This process should also die.
-            time.sleep(60)
             os._exit(1)
 
     def send_distributed_port(self, port: int):
