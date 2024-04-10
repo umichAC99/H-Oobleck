@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 import itertools
 import os
-import time
 from multiprocessing.connection import Connection
 from pathlib import Path
 
