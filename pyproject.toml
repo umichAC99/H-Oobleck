@@ -39,6 +39,9 @@ dev = [
     "datasets",
 ]
 
+[project.scripts]
+oobleck = "oobleck.cli:main"
+
 [tool.ruff]
 # Never enforce `E501` (line length violations).
 ignore = ["E501"]
