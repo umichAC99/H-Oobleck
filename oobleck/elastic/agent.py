@@ -198,6 +198,11 @@ class Agent:
         for worker in self.workers:
             worker.pipe.send(port)
 
+        # Master rank will send another message to the agent to reset the port
+        if self.agent_index == 0:
+            self.workers[0].pipe.recv()
+            self.stub.SetMasterRankPort(PortInfo(port=0))
+
     def watch_worker_exit(self):
         """Watch worker exit and restart it.
         TODO: It must detect ANY worker exit, not just the first one."""

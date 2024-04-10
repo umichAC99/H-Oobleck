@@ -169,6 +169,9 @@ class ConfigurationEngine:
             # this distributed port is broadcasted and event this process receives it.
             # For master it is useless, so just discard it.
             self.receive_distributed_port()
+
+            # Send anything to the agent back to ask to reset the port
+            self.pipe.send(0)
         else:
             port = self.receive_distributed_port()
             logger.debug(f"Received torch.distributed rank 0 port: {port}")
