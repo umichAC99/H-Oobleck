@@ -179,10 +179,18 @@ class ExecutionEngine:
     def notification_receive_func(self):
         logger.info("Start failure notification watcher.")
         configuration_engine = ConfigurationEngine.get_instance()
-        configuration_engine.recv_reconfiguration_notification()
+        immediate_restart = configuration_engine.recv_reconfiguration_notification()
         self.need_reconfiguration = True
-        self.on_receive_reconfiguration_notifiation()
-        logger.info("Failure watcher received notification and terminated.")
+
+        if immediate_restart:
+            logger.warning(
+                "Immediate reconfiguration is needed. Termiating torch.distributed."
+            )
+            self.on_receive_reconfiguration_notifiation()
+        else:
+            logger.info(
+                "Received reconfiguration request. Will start after the current iteration."
+            )
 
     def on_receive_reconfiguration_notifiation(self):
         """
@@ -234,10 +242,13 @@ class ExecutionEngine:
         return_outputs: bool = False,
     ) -> dict[str, Any] | None:
         if self.need_reconfiguration:
-            logger.warning(
-                "Reconfiguration is needed. Should call reconfigure() first."
-            )
             self.notification_receiver_thread.join()
+            if dist.is_initialized():
+                # If torch.distributed is still initialized, this means
+                # the configuration was not immediate and should be done now.
+                dist.barrier()
+                torch.cuda.synchronize()
+                self.on_receive_reconfiguration_notifiation()
             return None
 
         if getattr(dataloader_iterator, "invalidated", False):
@@ -267,7 +278,9 @@ class ExecutionEngine:
                 return_outputs=return_outputs,
             )
         except dist.DistError as e:
-            logger.warning(f"DistError caught: {str(e)}. Reconfiguration is needed.")
+            logger.warning(
+                f"DistError caught: {str(e)}. Immediate reconfiguration is needed."
+            )
             # Failure happens and WORLD process group has been destroyed.
             setattr(dataloader_iterator, "invalidated", True)
 

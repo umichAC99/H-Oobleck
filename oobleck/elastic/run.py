@@ -7,6 +7,7 @@ import sys
 from concurrent import futures
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
+from enum import Enum
 from multiprocessing.context import SpawnProcess
 from multiprocessing.synchronize import Condition
 from pathlib import Path
@@ -53,11 +54,18 @@ class ScriptArguments:
     training_script_args: list[str]
 
 
+class HostStatus(Enum):
+    up = 0
+    killed = 1
+    terminating = 2
+
+
 @dataclass
 class HostInfo:
     ip: str
     devices: str
     port: int
+    status: HostStatus = HostStatus.up
 
     def __eq__(self, other: HostInfo) -> bool:
         return (
@@ -251,7 +259,7 @@ class MultiNodeAgentRunner:
                     )
                     agent_list.remove(value)
 
-                logger.debug("Remained agents: {}", agent_list)
+                logger.debug("Remaining agents: {}", agent_list)
 
                 if reconfiguration_needed:
                     with self.disconnect_condition:
@@ -288,7 +296,10 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
         return master_service_pb2.DistInfo(
             hosts=[
                 master_service_pb2.HostInfo(
-                    ip=host.ip, devices=host.devices, port=host.port
+                    ip=host.ip,
+                    devices=host.devices,
+                    port=host.port,
+                    status=host.status.name,
                 )
                 for host, _ in agent_list
             ]
@@ -319,6 +330,18 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
     ) -> master_service_pb2.PortInfo:
         return master_service_pb2.PortInfo(port=self.master_port)
 
+    def KillAgent(
+        self, request: master_service_pb2.AgentInfo, context: grpc.RpcContext
+    ):
+        agent_index = request.agent_index
+        host, _ = agent_list[agent_index]
+
+        host.status = HostStatus.terminating
+        logger.info(f"Terminating agent {agent_index} on {host.ip}:{host.port}")
+
+        with self.disconnect_condition:
+            self.disconnect_condition.notify_all()
+
     def WatchReconfigurationNotification(
         self,
         request: empty_pb2.Empty,
@@ -331,7 +354,10 @@ class MasterService(master_service_pb2_grpc.OobleckMasterServicer):
             yield master_service_pb2.DistInfo(
                 hosts=[
                     master_service_pb2.HostInfo(
-                        ip=host.ip, devices=host.devices, port=host.port
+                        ip=host.ip,
+                        devices=host.devices,
+                        port=host.port,
+                        status=host.status.name,
                     )
                     for host, _ in agent_list
                 ]

@@ -19,7 +19,7 @@ from loguru import logger
 
 from oobleck.elastic.master_service_pb2 import CodeInfo, DistInfo, PortInfo
 from oobleck.elastic.master_service_pb2_grpc import OobleckMasterStub
-from oobleck.elastic.run import HostInfo
+from oobleck.elastic.run import HostInfo, HostStatus
 from oobleck.engine.configuration_engine import ConfigurationEngine
 
 
@@ -97,19 +97,24 @@ class Agent:
         # Get distributed information and code from the master
         dist_info: DistInfo = stub.GetDistInfo(Empty())
         self.dist_info = list(
-            HostInfo(host.ip, host.devices, host.port) for host in dist_info.hosts
+            HostInfo(host.ip, host.devices, host.port, HostStatus[host.status])
+            for host in dist_info.hosts
         )
         training_args: CodeInfo = stub.GetCode(Empty())
         self.script: Path = Path(training_args.path)
         self.script_args: list[str] = [arg for arg in training_args.args]
         self.workers: list[Worker] = []
 
-    def notify_reconfiguration_to_workers(self, dist_info: list[HostInfo]):
+    def notify_reconfiguration_to_workers(
+        self, dist_info: list[HostInfo], immediate_restart: bool
+    ):
         logger.warning(
             f"Reconfiguration request received from master: {dist_info}. Sending to workers"
         )
         for worker in self.workers:
-            worker.pipe.send("reconfigure")
+            worker.pipe.send(
+                "immediate_reconfigure" if immediate_restart else "reconfigure"
+            )
             worker.pipe.send(dist_info)
 
         self.forward_master_port()
@@ -118,9 +123,25 @@ class Agent:
         for dist_info in self.stub.WatchReconfigurationNotification(Empty()):
             dist_info = cast(DistInfo, dist_info)
             dist_info = [
-                HostInfo(host.ip, host.devices, host.port) for host in dist_info.hosts
+                HostInfo(host.ip, host.devices, host.port, HostStatus[host.status])
+                for host in dist_info.hosts
             ]
-            self.notify_reconfiguration_to_workers(dist_info)
+
+            immediate_restart = False
+            if any(host.status == HostStatus.killed for host in dist_info):
+                immediate_restart = True
+            else:
+                assert (
+                    len(self.dist_info) != len(dist_info)
+                    or any(host.status == HostStatus.terminating for host in dist_info)
+                ), "The number of hosts must not change or some hosts should be in terminating."
+
+            self.dist_info = [
+                host_info
+                for host_info in dist_info
+                if host_info.status != HostStatus.killed
+            ]
+            self.notify_reconfiguration_to_workers(self.dist_info, immediate_restart)
 
     def run_profiler(self):
         raise NotImplementedError()
