@@ -1,66 +1,67 @@
-import asyncio
+import multiprocessing
+from concurrent import futures
+from pathlib import Path
 
-import pytest_asyncio
-from pytest_mock import MockerFixture
+import grpc
+import pytest
 
-from oobleck.elastic.agent import OobleckAgent
-from oobleck.elastic.master import OobleckMasterDaemon
-from oobleck.elastic.training_util import (
-    DistributedArguments,
-    JobArguments,
-    ModelArguments,
-    OobleckArguments,
+from oobleck.elastic import master_service_pb2_grpc, run
+from oobleck.elastic.run import (
+    HostInfo,
+    LaunchArguments,
+    MasterService,
+    ScriptArguments,
 )
 
+fake_host_info = [
+    HostInfo("127.0.0.1", "0,1", 1234),
+    HostInfo("127.0.0.2", "0,1", 1234),
+    HostInfo("127.0.0.3", "0,1", 1234),
+]
 
-class OobleckElasticTestCase:
-    sample_num_workers: int = 4
-    sample_ip: str = "127.0.0.1"
 
-    @pytest_asyncio.fixture(autouse=True)
-    async def daemon(
-        self,
-        event_loop: asyncio.AbstractEventLoop,
-    ) -> OobleckMasterDaemon:
-        daemon = await OobleckMasterDaemon.create("127.0.0.1", 0)
-        daemon._job_arguments[0] = OobleckArguments(
-            dist=DistributedArguments(
-                master_ip="127.0.0.1",
-                master_port=daemon.port,
-                node_ips=["127.0.0.1", "127.0.0.2"],
-                username="test",
-                num_agents_per_node=1,
-                num_workers=4,
-            ),
-            job=JobArguments(),
-            model=ModelArguments(
-                model_name="gpt2",
-                model_tag="test",
-                dataset_path="test",
-                dataset_name=None,
-            ),
+@pytest.fixture()
+def server(
+    tmp_path: Path,
+) -> tuple[LaunchArguments, ScriptArguments, MasterService, int]:
+    fake_launch_args = LaunchArguments(
+        hostfile=Path(tmp_path / "hostfile"),
+        tag="test-gpt2",
+        base_dir=tmp_path,
+    )
+
+    fake_launch_args.hostfile.write_text(
+        "\n".join(
+            list(
+                f"{host.ip} slots={len(host.devices.split(','))} devices={host.devices} port={host.port}"
+                for host in fake_host_info
+            )
         )
+    )
 
-        event_loop.create_task(daemon._server.serve_forever())
+    fake_script_args = ScriptArguments(
+        training_script=Path(tmp_path / "testscript.py"),
+        training_script_args=["--foo", "bar", "--baz", "qux"],
+    )
 
-        yield daemon
+    fake_script_args.training_script.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--foo')\n"
+        "parser.add_argument('--baz')\n"
+        "args = parser.parse_args()\n"
+        "print(f'Hello, {args.foo}, {args.baz}')\n"
+    )
 
-        if not daemon._server.is_serving():
-            return
-        daemon._server.close()
-        await daemon._server.wait_closed()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    run.agent_list = [(host, None) for host in fake_host_info]
+    service = MasterService(
+        fake_script_args,
+        multiprocessing.get_context("spawn").Condition(),
+    )
+    master_service_pb2_grpc.add_OobleckMasterServicer_to_server(service, server)
+    port = server.add_insecure_port("0.0.0.0:0")
+    server.start()
 
-    @pytest_asyncio.fixture
-    async def agent(
-        self, daemon: OobleckMasterDaemon, mocker: MockerFixture
-    ) -> OobleckAgent:
-        agent = OobleckAgent("127.0.0.1", daemon.port, 0, 0)
-
-        future = asyncio.Future()
-        future.set_result(None)
-        mocker.patch.object(agent, "_run_profiler", return_value=future)
-        await agent._connect_to_master("127.0.0.1", daemon.port)
-        yield agent
-        if not agent._conn[1].is_closing():
-            agent._conn[1].close()
-            await agent._conn[1].wait_closed()
+    yield fake_launch_args, fake_script_args, service, port
+    server.stop(grace=None)

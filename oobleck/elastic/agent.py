@@ -1,302 +1,263 @@
-import asyncio
 import multiprocessing
 import os
-import socket
+import runpy
 import sys
+import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from multiprocessing import connection
+from multiprocessing.connection import Connection
+from multiprocessing.context import SpawnContext, SpawnProcess
+from pathlib import Path
+from typing import cast
 
-import simple_parsing as sp
-from deepspeed.utils.logging import LoggerFactory
+import click
+import grpc
+import torch
+from google.protobuf.empty_pb2 import Empty
+from loguru import logger
 
-import oobleck.elastic.message_util as message_util
-from oobleck.csrc.planning.pipeline_template import get_profile_results
-from oobleck.elastic.training_util import OobleckArguments
-from oobleck.elastic.worker import worker_main
-from oobleck.planning.profiler import profile, validate_model_args
+from oobleck.elastic.master_service_pb2 import CodeInfo, DistInfo, PortInfo
+from oobleck.elastic.master_service_pb2_grpc import OobleckMasterStub
+from oobleck.elastic.run import HostInfo, HostStatus
+from oobleck.engine.configuration_engine import ConfigurationEngine
 
-logger = LoggerFactory.create_logger("oobleck_agent")
+
+@contextmanager
+def temporary_argv(new_argv: list[str]):
+    old_argv = sys.argv[:]
+    sys.argv = new_argv
+    try:
+        yield
+    finally:
+        sys.argv = old_argv
 
 
 @dataclass
 class Worker:
-    pipe: connection.Connection
-    process: multiprocessing.Process
+    pipe: Connection
+    process: SpawnProcess
+
+    @staticmethod
+    def worker_main(
+        pipe: Connection,
+        agent_index: int,
+        gpu_index: int,
+        tag: str,
+        base_dir: Path,
+        script_path: Path,
+        script_args: list[str],
+    ):
+        """
+        Worker process main function.
+
+        It creates ConfigurationEngine that will internally be used in
+        ExecutionEngine, and execute the given code.
+        """
+        assert (
+            torch.cuda.device_count() == 1
+        ), "CUDA_VISIBLE_DEVICES must be set to a single GPU."
+
+        assert ConfigurationEngine._instance is None, (
+            "ConfigurationEngine must not be initialized before "
+            "worker_main() is called."
+        )
+
+        logger.debug(
+            f"Worker process started: (agent_index: {agent_index}, "
+            f"gpu_index: {os.environ['CUDA_VISIBLE_DEVICES']})"
+        )
+
+        ConfigurationEngine.create(pipe, agent_index, gpu_index, tag, base_dir)
+
+        argv = [script_path] + list(script_args)
+        with temporary_argv(argv):
+            runpy.run_path(script_path.as_posix(), run_name="__main__")
 
 
-class OobleckAgent:
+class Agent:
+    """Oobleck Agent class.
+
+    For each node, there is one agent process that manages
+    worker processes in the node.
     """
-    Oobleck agent process that runs on each agent node.
-    It manages worker processes, where one worker is a rank in distributed training.
 
-    An agent does:
-    1. It registers itself to the master daemon when it starts.
-    2. After registration, it periodically sends a liveness packet to the master,
-       and wait for reconfiguration notification.
-    3. Once reconfiguration is arrived, it sends a SIGUSR1 signal to all workers,
-       letting them know that they need reconfiguration.
-    4. An agent and workers have a dedicated mp.queue. After sending a signal,
-       the agent queries a new distribution information from the master and forward it to workers.
-    """
+    def __init__(
+        self,
+        agent_index: int,
+        job_tag: str,
+        base_dir: Path,
+        stub: OobleckMasterStub,
+    ):
+        self.agent_index = agent_index
+        self.tag = job_tag
+        self.base_dir = base_dir
+        self.stub = stub
 
-    def __init__(self, master_ip: str, master_port: int, job_id: int, agent_index: int):
-        self._master_ip = master_ip
-        self._master_port = master_port
-        self._job_id = job_id
-        self._agent_index = agent_index
-
-        self._args: OobleckArguments | None = None
-        self._conn: tuple[asyncio.StreamReader, asyncio.StreamWriter] | None = None
-        self._workers: list[Worker] = []
-        self._response_callbacks: dict[message_util.RequestType, callable] = {}
-        self._job_done: bool = False
-
-    async def run(self):
-        await self._connect_to_master(self._master_ip, self._master_port)
-        args = await self._register_agent(self._job_id)
-        await self._launch_workers(args)
-
-        self._args = args
-        while not self._job_done:
-            await self.on_receive_response()
-
-    async def _connect_to_master(self, master_ip: str, master_port: int):
-        # TODO: add timeout in connection
-        self._conn = await asyncio.wait_for(
-            asyncio.open_connection(master_ip, master_port),
-            timeout=message_util.TIMEOUT,
+        # Get distributed information and code from the master
+        dist_info: DistInfo = stub.GetDistInfo(Empty())
+        self.dist_info = list(
+            HostInfo(host.ip, host.devices, host.port, HostStatus[host.status])
+            for host in dist_info.hosts
         )
+        training_args: CodeInfo = stub.GetCode(Empty())
+        self.script: Path = Path(training_args.path)
+        self.script_args: list[str] = [arg for arg in training_args.args]
+        self.workers: list[Worker] = []
 
-    async def _register_agent(self, job_id: int) -> OobleckArguments:
-        await message_util.send_request_type(
-            self._conn[1], message_util.RequestType.REGISTER_AGENT
+    def notify_reconfiguration_to_workers(
+        self, dist_info: list[HostInfo], immediate_restart: bool
+    ):
+        logger.warning(
+            f"Reconfiguration request received from master: {dist_info}. Sending to workers"
         )
-        await message_util.send(self._conn[1], job_id)
-        result, req = await message_util.recv_response(self._conn[0])
-        if (
-            result is not message_util.Response.SUCCESS
-            or req is not message_util.RequestType.REGISTER_AGENT
-        ):
-            raise ConnectionError("Failed to register agent")
-
-        return await message_util.recv(self._conn[0])
-
-    def _run_profiler(self, args: OobleckArguments):
-        ctx = multiprocessing.get_context("spawn")
-        profiler_processes: list[multiprocessing.Process] = []
-
-        for index in range(args.dist.num_workers):
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(index)
-            my_ip = socket.gethostbyname(socket.gethostname())
-            master_ip = args.dist.node_ips[0]
-            master_port = 23456
-            world_size = len(args.dist.node_ips) * args.dist.num_workers
-            rank = args.dist.node_ips.index(my_ip) * args.dist.num_workers + index
-            process = ctx.Process(
-                target=profile,
-                args=(
-                    args,
-                    master_ip,
-                    master_port,
-                    args.dist.num_workers,
-                    world_size,
-                    rank,
-                ),
+        for worker in self.workers:
+            worker.pipe.send(
+                "immediate_reconfigure" if immediate_restart else "reconfigure"
             )
-            process.start()
-            profiler_processes.append(process)
+            worker.pipe.send(dist_info)
 
-        for process in profiler_processes:
-            process.join()
+        # If this agent is about to die, don't forward the port
+        if dist_info[self.agent_index].status == HostStatus.terminating:
+            return
 
-    async def _launch_workers(self, args: OobleckArguments):
-        # Test if profile data exists
-        try:
-            get_profile_results(
-                args.model.model_name,
-                args.model.model_tag,
-                args.job.microbatch_size,
-            )
+        self.forward_master_port()
 
-            if not validate_model_args(args):
-                logger.warning(
-                    "Model arguments are inconsistent: "
-                    f"{args.model.model_args} != model_args.json."
-                )
-                raise RuntimeError("Model arguments are inconsistent")
+    def watch_reconfiguration_notification(self):
+        for dist_info in self.stub.WatchReconfigurationNotification(Empty()):
+            dist_info = cast(DistInfo, dist_info)
+            dist_info = [
+                HostInfo(host.ip, host.devices, host.port, HostStatus[host.status])
+                for host in dist_info.hosts
+            ]
 
-            logger.info(f"Job arguments: {args}")
-        except Exception:
-            # Run profiler
-            logger.warning(
-                f"Profile data for model {args.model.model_name} not found. Launching profiler..."
-            )
-            self._run_profiler(args)
+            immediate_restart = False
+            if any(host.status == HostStatus.killed for host in dist_info):
+                immediate_restart = True
+            else:
+                assert (
+                    len(self.dist_info) != len(dist_info)
+                    or any(host.status == HostStatus.terminating for host in dist_info)
+                ), "The number of hosts must not change or some hosts should be in terminating."
 
-        dist_info = message_util.DistributionInfo(
-            agent_ips=args.dist.node_ips,
-            world_size=len(args.dist.node_ips) * args.dist.num_workers,
+            self.dist_info = [
+                host_info
+                for host_info in dist_info
+                if host_info.status != HostStatus.killed
+            ]
+            self.notify_reconfiguration_to_workers(self.dist_info, immediate_restart)
+
+    def run_profiler(self):
+        raise NotImplementedError()
+
+    def launch_workers(self):
+        """Launch worker processes."""
+        ctx: SpawnContext = multiprocessing.get_context("spawn")
+
+        gpu_indices: list[int] = list(
+            int(dev) for dev in self.dist_info[self.agent_index].devices.split(",")
         )
 
-        ctx = multiprocessing.get_context("spawn")
-
-        gpu_indices = range(
-            self._agent_index * args.dist.num_workers,
-            (self._agent_index + 1) * args.dist.num_workers,
+        tensor_parallel_size = len(gpu_indices)
+        ranks = range(
+            self.agent_index * tensor_parallel_size,
+            (self.agent_index + 1) * tensor_parallel_size,
         )
 
-        for gpu_index in gpu_indices:
-            logger.info(f"Launching worker {gpu_index}...")
-            # TODO: add all arguments. Arguments should be passed from the master
-            # via command line arguments.
+        os.environ["TORCH_NCCL_USE_COMM_NONBLOCKING"] = "1"
+        os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "0"
+        for gpu_index, rank in zip(gpu_indices, ranks):
+            logger.info(f"Launching worker {rank} (GPU: {gpu_index})...")
+
             pipe, child_pipe = ctx.Pipe()
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
 
-            process = ctx.Process(
-                target=worker_main,
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+            process: SpawnProcess = ctx.Process(
+                target=Worker.worker_main,
                 args=(
-                    gpu_index,
-                    len(args.dist.node_ips),
-                    args.dist.num_workers,
                     child_pipe,
-                    args,
+                    self.agent_index,
+                    gpu_index % tensor_parallel_size,
+                    self.tag,
+                    self.base_dir,
+                    self.script,
+                    self.script_args,
                 ),
-                daemon=True,
+                daemon=False,
             )
             process.start()
+            self.workers.append(Worker(pipe, process))
+            pipe.send(self.dist_info)
+        del os.environ["CUDA_VISIBLE_DEVICES"]
 
-            self._workers.append(Worker(pipe, process))
-            pipe.send(dist_info)
+        self.forward_master_port()
 
-            # TODO: detect worker failure and report it to the master.
-            # For now only consider node failure, thus training will go stuck
-            # if a worker fails.
-        os.environ.pop("CUDA_VISIBLE_DEVICES")
+    def forward_master_port(self):
+        """
+        Forward master port after receiving it from the master
+        to all worker processes.
 
-        # If a worker has rank 0, it should forward its port to the master
-        my_ip: str = socket.gethostbyname(socket.gethostname())
-        if my_ip == args.dist.node_ips[0]:
-            await self.forward_worker_port(self._workers[0].pipe)
+        If this is the first agent, it should send the rank 0 port
+        from its first worker to master too.
+        """
+        # If this is the first agent, it should forward the master rank port
+        if self.agent_index == 0:
+            logger.debug("Waiting for rank 0 port...")
+            port: int = self.workers[0].pipe.recv()
+            logger.debug(f"Received rank 0 port: {port}. Sending it to master.")
+            self.stub.SetMasterRankPort(PortInfo(port=port))
 
-    async def forward_worker_port(self, pipe: connection.Connection):
-        _, w = self._conn
-        port: int = pipe.recv()
-        logger.info(f"Received worker port: {port}. Forwarding it to master...")
-        await message_util.send_request_type(
-            w, message_util.RequestType.FORWARD_RANK0_PORT
-        )
-        await message_util.send(w, port, need_pickle=True, drain=True, close=False)
+        port: int = 0
+        while port == 0:
+            time.sleep(0.1)
+            port = self.stub.GetMasterRankPort(Empty()).port
 
-    async def on_receive_worker_port(self, port: int):
-        r, w = self._conn
-
-        for worker in self._workers:
+        for worker in self.workers:
             worker.pipe.send(port)
 
-    async def send_request(
-        self,
-        request: message_util.RequestType,
-        args: dict | None = None,
-        callback: callable = None,
-    ):
-        if request in self._response_callbacks:
-            logger.warning(
-                f"Already pending request for the same request type {request}"
-            )
-            return
+        # Master rank will send another message to the agent to reset the port
+        if self.agent_index == 0:
+            self.workers[0].pipe.recv()
+            self.stub.SetMasterRankPort(PortInfo(port=0))
 
-        if request is not message_util.RequestType.PING:
-            self._response_callbacks[request] = callback
-        await message_util.send_request_type(self._conn[1], request)
+    def watch_worker_exit(self):
+        """Watch worker exit and restart it.
+        TODO: It must detect ANY worker exit, not just the first one."""
+        for worker in self.workers:
+            worker.process.join()
+            if worker.process.exitcode != 0:
+                logger.warning(
+                    f"Worker {worker.process.pid} exited with code {worker.process.exitcode}."
+                )
+        logger.info("All workers exited.")
 
-        if args is not None:
-            await message_util.send(
-                self._conn[1], args, need_pickle=True, drain=True, close=False
-            )
 
-    async def on_receive_reconfiguration(self, lost_node_ip: str):
-        logger.debug(f"reconfiguration request received due to node failure: {str}")
+@click.command
+@click.option("--master_ip", type=str, help="Master IP address.")
+@click.option("--master_port", type=int, help="Master port.")
+@click.option("--agent_index", type=int, help="The index of this agent process.")
+@click.option("--tag", type=str, help="A tag to identify this run.")
+@click.option(
+    "--base_dir", type=Path, help="Oobleck root directory store logs and profiles."
+)
+def run(master_ip: str, master_port: int, agent_index: int, tag: str, base_dir: Path):
+    # Connect to the master
+    channel = grpc.insecure_channel(f"{master_ip}:{master_port}")
+    stub = OobleckMasterStub(channel)
 
-        # This is for emulating a lost node by sending a command from the master.
-        # Won't happen in normal case.
-        if lost_node_ip == socket.gethostbyname(socket.gethostname()):
-            logger.info("I'm the lost node. I'll terminate myself.")
-            for worker in self._workers:
-                worker.process.terminate()
-            sys.exit(1)
+    agent = Agent(agent_index, tag, base_dir, stub)
+    agent.launch_workers()
 
-        else:
-            self._args.dist.node_ips.remove(lost_node_ip)
-            # Send notification to workers
-            for worker in self._workers:
-                worker.pipe.send(lost_node_ip)
+    def watch_reconfiguration_noti_func():
+        while True:
+            agent.watch_reconfiguration_notification()
 
-    async def on_receive_response(self):
-        r, w = self._conn
-        loop = asyncio.get_running_loop()
-        try:
-            while not r.at_eof():
-                result = await message_util.recv_response(r, timeout=None)
-                logger.debug(f"Receiving: {result}")
+    thread = threading.Thread(target=watch_reconfiguration_noti_func, daemon=True)
+    thread.start()
 
-                if result == (
-                    message_util.Response.PONG,
-                    message_util.RequestType.PING,
-                ):
-                    pass
-
-                elif result == (
-                    message_util.Response.RECONFIGURATION,
-                    message_util.RequestType.UNDEFINED,
-                ):
-                    lost_node: str = await message_util.recv(
-                        self._conn[0], need_pickle=True
-                    )
-                    loop.create_task(self.on_receive_reconfiguration(lost_node))
-
-                elif result == (
-                    message_util.Response.FORWARD_RANK0_PORT,
-                    message_util.RequestType.UNDEFINED,
-                ):
-                    port: int = await message_util.recv(r, need_pickle=True)
-                    loop.create_task(self.on_receive_worker_port(port))
-                elif result[0] == message_util.Response.SUCCESS:
-                    response, request = result
-                    if request not in self._response_callbacks:
-                        logger.warning(f"Unexpected response: {request}")
-                        continue
-
-                    callback = self._response_callbacks.pop(request)
-                    await callback()
-                else:
-                    logger.warning(f"Unexpected response: {result}")
-                    continue
-
-        except asyncio.IncompleteReadError:
-            logger.info("Connection closed by master")
-            self._job_done = True
-            return
-
-    async def ping(self):
-        loop = asyncio.get_running_loop()
-        try:
-            while loop.is_running():
-                await asyncio.sleep(0.4)
-                logger.debug("Sending ping")
-                await self.send_request(message_util.RequestType.PING, None, None)
-        except asyncio.CancelledError:
-            pass
+    agent.watch_worker_exit()
+    logger.info(f"Agent {agent_index} exited.")
 
 
 if __name__ == "__main__":
-    parser = sp.ArgumentParser()
-    parser.add_argument("--master_ip", type=str)
-    parser.add_argument("--master_port", type=int)
-    parser.add_argument("--job_id", type=int)
-    parser.add_argument("--agent_index", type=int)
-
-    args = parser.parse_args()
-    agent = OobleckAgent(
-        args.master_ip, args.master_port, args.job_id, args.agent_index
-    )
-    asyncio.run(agent.run())
+    run()

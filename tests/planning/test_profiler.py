@@ -1,247 +1,144 @@
 import json
-import math
-import multiprocessing as mp
-import random
-import shutil
-import string
+import multiprocessing
+import os
 from pathlib import Path
 
-import pytest
 import torch
-import torch.distributed
-
-from oobleck.csrc.planning.pipeline_template import (
-    LayerExecutionResult,
-    LayerExecutionResults,
-    get_profile_results,
+import torch.distributed as dist
+from torch.testing._internal.common_distributed import (
+    MultiProcessTestCase,
+    cleanup_temp_dir,
+    initialize_temp_directories,
+    requires_nccl,
+    skip_if_lt_x_gpu,
 )
-from oobleck.module.model import OobleckModel
-from oobleck.planning.profiler import Profiler
-from tests.conftest import OobleckMultiProcessTestCase, OobleckSingleProcessTestCase
+from torch.testing._internal.common_utils import (
+    FILE_SCHEMA,
+    instantiate_parametrized_tests,
+    parametrize,
+)
+
+from oobleck.elastic.run import HostInfo
+from oobleck.engine.configuration_engine import ConfigurationEngine
+from oobleck.planning.profiler import ModelProfiler
+
+from ..conftest import config, model_name, modules, tag
+from .data_builder import GLUEDataBuilder
+
+microbatch_size = 1
 
 
-@pytest.mark.skip(reason="Blocking vscode test status track.")
-class TestProfiler(OobleckSingleProcessTestCase):
-    @pytest.fixture(scope="function")
-    def model(self) -> OobleckModel:
-        return self.factory.get_model()
+class TestProfileModelClass(MultiProcessTestCase):
+    @property
+    def world_size(self):
+        return 4
 
-    @pytest.fixture(scope="function")
-    def profile(self) -> LayerExecutionResults:
-        return self.factory.get_dummy_profile()
+    def setUp(self):
+        super().setUp()
+        initialize_temp_directories()
+        self._spawn_processes()
 
-    @pytest.mark.skip(
-        reason="Duplicated test. Remove it only if test_profile_* test fails."
-    )
-    def test_profile_execution_layers(self, model: OobleckModel, distributed):
-        profiler = Profiler(model)
+    def tearDown(self):
+        cleanup_temp_dir()
+        ConfigurationEngine._instance = None
+        super().tearDown()
 
-        assert all(
-            all(not p.is_cuda for p in layer.parameters()) for layer in model.layers
+    def init_configuration_engine(self, temp_dir: Path):
+        pipe, child_pipe = multiprocessing.Pipe()
+        # dist info
+        pipe.send([HostInfo("127.0.0.1", self.world_size, 1234)])
+        self.pipe = pipe
+        ConfigurationEngine.create(child_pipe, 0, self.rank, tag, temp_dir)
+
+    def init_distributed(self):
+        print(f"dist init r={self.rank}, world={self.world_size}")
+        dist.init_process_group(
+            init_method=f"{FILE_SCHEMA}{self.file_name}",
+            backend="nccl",
+            world_size=self.world_size,
+            rank=self.rank,
+        )
+        dist.barrier()
+        torch.cuda.synchronize()
+
+    @parametrize("precision", ["fp16", "bf16", "fp32"])
+    @requires_nccl()
+    @skip_if_lt_x_gpu(4)
+    def test_profile_api(self, precision: str):
+        """This tests the public get_profile() method."""
+        temp_path = Path(os.environ["TEMP_DIR"])
+        profile_dir = temp_path / tag / "profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        # This is to use different GPUs in distributed communication
+        torch.cuda.set_device(self.rank)
+        # This doesn't affect the current process, but will affect
+        # child process that will be spawned during `init_profile()`.
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(self.rank)
+
+        self.init_configuration_engine(temp_path)
+
+        profiler = ModelProfiler(
+            tag=tag,
+            model_name_or_path=model_name,
+            optimizer_class="torch.optim.Adam",
+            config=config,
+            precision=precision,
+            tp_size=4,
+            base_dir=temp_path,
         )
 
-        results = profiler.profile_execution_layers(1)
-        assert isinstance(results, list)
-        assert len(results) == len(model.layers)
-        for layer_result in results:
-            assert isinstance(layer_result, dict)
-            assert "forward" in layer_result and isinstance(
-                layer_result["forward"], float
-            )
-            assert "backward" in layer_result and isinstance(
-                layer_result["backward"], float
-            )
-            assert "mem_required" in layer_result and isinstance(
-                layer_result["mem_required"], tuple
-            )
-            assert len(layer_result["mem_required"]) == 2
-            assert (
-                layer_result["mem_required"][0] > 0
-                and layer_result["mem_required"][1] > 0
-            )
+        dataloader = GLUEDataBuilder("gpt2").dataloader(batch_size=16)
+        inputs = next(iter(dataloader))
+        profiler.init_profile(inputs)
 
-        # make sure model parameters are still on CPU side
-        assert all(
-            all(not p.is_cuda for p in layer.parameters()) for layer in model.layers
+        self.init_distributed()
+        profile_result = profiler.load_profile(16)
+
+        results = [None, None, None, None]
+        dist.all_gather_object(results, profile_result)
+        assert all([result == profile_result for result in results])
+
+    @parametrize("precision", ["fp16", "bf16", "fp32"])
+    @requires_nccl()
+    @skip_if_lt_x_gpu(4)
+    def test_profile_model(self, precision: str):
+        """This tests the private _profile_model() method."""
+        temp_path = Path(os.environ["TEMP_DIR"])
+        profile_dir = temp_path / tag / "profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        torch.cuda.set_device(self.rank)
+
+        dataloader = GLUEDataBuilder("gpt2").dataloader(batch_size=16)
+        inputs = next(iter(dataloader))
+
+        ModelProfiler._profile_model(
+            model_name_or_path=model_name,
+            model_config=config,
+            optimizer_class="torch.optim.Adam",
+            profile_dir=profile_dir,
+            local_rank=self.rank,
+            tp_size=self.world_size,
+            precision=precision,
+            inputs=inputs,
+            warmup=1,
         )
 
-    @pytest.mark.skip(
-        reason="Duplicated test. Remove it only if test_profile_* test fails."
-    )
-    def test_profile_allreduce_layer(self, model: OobleckModel, distributed):
-        profiler = Profiler(model)
+        # _profile_model automatically synchronize
 
-        assert all(
-            all(not p.is_cuda for p in layer.parameters()) for layer in model.layers
+        microbatch_size = inputs["input_ids"].shape[0]
+        profile_path = ModelProfiler.get_profile_path(
+            profile_dir, self.world_size, microbatch_size, precision
         )
 
-        # test allreduce between GPUs in node
-        # unittest only uses 1 GPU
-        results_in_node = profiler.profile_allreduce_in_node()
-        assert isinstance(results_in_node, list)
-        assert len(results_in_node) == len(model.layers)
-        for layer_result in results_in_node:
-            assert isinstance(layer_result, dict)
-            assert len(list(layer_result.keys())) == 1
-            assert 1 in layer_result  # key is # GPUs in a node
-
-        # make sure model parameters are still on CPU side
-        assert all(
-            all(not p.is_cuda for p in layer.parameters()) for layer in model.layers
-        )
-
-    @pytest.mark.skip(
-        reason="Duplicated test. Remove it only if test_profile_* test fails."
-    )
-    def test_profile_allreduce_layer_across_nodes(
-        self, model: OobleckModel, distributed
-    ):
-        profiler = Profiler(model)
-
-        assert all(
-            all(not p.is_cuda for p in layer.parameters()) for layer in model.layers
-        )
-
-        # test allreduce across nodes
-        # unittest only uses 1 node
-        results_across_nodes = profiler.profile_allreduce_across_nodes()
-        assert isinstance(results_across_nodes, list)
-        assert len(results_across_nodes) == len(model.layers)
-        for layer_result in results_across_nodes:
-            assert isinstance(layer_result, dict)
-            assert len(list(layer_result.keys())) == 1
-            assert 1 in layer_result  # key is # nodes
-
-        # make sure model parameters are still on CPU side
-        assert all(
-            all(not p.is_cuda for p in layer.parameters()) for layer in model.layers
-        )
-
-    @pytest.fixture
-    def random_tag(self, model: OobleckModel):
-        # This fixture is used to clean up the files created by profile.
-        exist = True
-        while exist:
-            random_tag = "".join(random.choices(string.ascii_letters, k=8))
-            path = Path(f"/tmp/oobleck/profiles/{model.model_name}-{random_tag}")
-            exist = path.exists()
-        path.mkdir(parents=True, exist_ok=False)
-        yield random_tag
-        shutil.rmtree(path, ignore_errors=True)
-
-    def test_profile_single_microbatch(self, model: OobleckModel, random_tag: str):
-        assert not torch.distributed.is_initialized()
-
-        process = mp.get_context("spawn").Process(
-            target=profile,
-            args=(
-                model.model_name,
-                model.sample_inputs,
-                "localhost",
-                0,
-                1,
-                0,
-                0,
-                1,
-                random_tag,
-                model.model_args.to_dict(),
-            ),
-        )
-        process.start()
-        process.join()
-
-        if process.exitcode != 0:
-            pytest.fail("Profiler failed. Run skipped tests to debug.")
-
-        directory = Path(f"/tmp/oobleck/profiles/{model.model_name}-{random_tag}")
-        assert directory.is_dir()
-
-        for filename in [
-            "mb1.json",
-            "allreduce_in_node.json",
-            "allreduce_across_nodes.json",
-        ]:
-            with directory.joinpath(filename) as path:
-                assert path.is_file()
-                with path.open(mode="r") as f:
-                    # check the file is json format, otherwise json.load will raise an error
-                    data = json.load(f)
-                    assert isinstance(data, list)
-                    assert len(data) == len(model.layers)
-
-        assert not torch.distributed.is_initialized()
-
-    def test_profile_multi_microbatch(self, model: OobleckModel, random_tag: str):
-        assert not torch.distributed.is_initialized()
-
-        process = mp.get_context("spawn").Process(
-            target=profile,
-            args=(
-                model.model_name,
-                model.sample_inputs,
-                "localhost",
-                0,
-                1,
-                0,
-                0,
-                4,
-                random_tag,
-                model.model_args.to_dict(),
-            ),
-        )
-        process.start()
-        process.join()
-
-        if process.exitcode != 0:
-            pytest.fail("Profiler failed. Run skipped tests to debug.")
-
-        directory = Path(f"/tmp/oobleck/profiles/{model.model_name}-{random_tag}")
-        assert directory.is_dir()
-
-        for filename in [
-            "mb4.json",
-            "allreduce_in_node.json",
-            "allreduce_across_nodes.json",
-        ]:
-            with directory.joinpath(filename) as path:
-                assert path.is_file()
-                with path.open(mode="r") as f:
-                    # check the file is json format, otherwise json.load will raise an error
-                    data = json.load(f)
-                    assert isinstance(data, list)
-                    assert len(data) == len(model.layers)
-
-        assert not torch.distributed.is_initialized()
-
-    def test_load_profile_results(self, model: OobleckModel, random_tag: str):
-        self.test_profile_single_microbatch(model, random_tag)
-        results = get_profile_results(
-            model_name=model.model_name,
-            model_tag=random_tag,
-            microbatch_size=1,
-        )
-
-        assert isinstance(results, LayerExecutionResults)
-        for result in results.get():
-            assert isinstance(result, LayerExecutionResult)
-            assert isinstance(result._index, int)
-            assert isinstance(result._forward, float)
-            assert isinstance(result._backward, float)
-            assert isinstance(result._allreduce_in_node, dict)
-            for num_gpus, ar in result._allreduce_in_node.items():
-                assert isinstance(num_gpus, int)
-                assert math.log2(num_gpus).is_integer(), "num_gpus must be a power of 2"
-                assert isinstance(ar, float)
-            assert isinstance(result._allreduce_across_nodes, dict)
-            for num_nodes, ar in result._allreduce_across_nodes.items():
-                assert isinstance(num_nodes, int)
-                assert num_nodes > 0
-                assert isinstance(ar, float)
-            assert isinstance(result._mem_required, tuple)
-            for mem in result._mem_required:
-                assert isinstance(mem, int)
+        assert profile_path.exists()
+        data = json.loads(profile_path.read_text())
+        assert data["precision"] == precision
+        assert data["tp_size"] == self.world_size
+        assert data["model_name"] == model_name
+        assert len(data["layers"]) == len(modules)
+        assert [layer["layer_name"] for layer in data["layers"]] == modules
 
 
-@pytest.mark.skip(reason="Not implemented yet")
-class TestMultiGPUProfiler(OobleckMultiProcessTestCase):
-    pass
+instantiate_parametrized_tests(TestProfileModelClass)

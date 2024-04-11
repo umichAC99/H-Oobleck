@@ -1,85 +1,125 @@
-import asyncio
 import multiprocessing
+from multiprocessing.connection import Connection
+from pathlib import Path
+from unittest.mock import patch
 
+import grpc
 import pytest
-from pytest_mock import MockerFixture
 
-from oobleck.elastic.agent import OobleckAgent, OobleckArguments, Worker
-from oobleck.elastic.master import OobleckMasterDaemon
-from tests.elastic.conftest import OobleckElasticTestCase
+from oobleck.elastic import run
+from oobleck.elastic.agent import Agent, Worker
+from oobleck.elastic.master_service_pb2_grpc import OobleckMasterStub
+from oobleck.elastic.run import (
+    HostInfo,
+    LaunchArguments,
+    MasterService,
+    ScriptArguments,
+)
+from oobleck.engine.configuration_engine import ConfigurationEngine
 
 
-class TestOobleckAgentClass(OobleckElasticTestCase):
-    @pytest.fixture(autouse=True)
-    def setup_method(self, mocker: MockerFixture):
-        mocker.patch(
-            "asyncio.StreamWriter.get_extra_info",
-            return_value=(self.sample_ip, "12345"),
-        )
+@pytest.fixture(autouse=True)
+def reset_configuration_engine():
+    del ConfigurationEngine._instance
+    ConfigurationEngine._instance = None
 
-    @pytest.mark.asyncio
-    async def test_register_agent(
-        self,
-        daemon: OobleckMasterDaemon,
-        agent: OobleckAgent,
+
+def worker_main_forward_master_port(
+    pipe: Connection,
+    agent_index: int,
+    gpu_index: int,
+    tag: str,
+    base_dir: Path,
+    code: bytes,
+    args: list[str],
+):
+    if agent_index == 0:
+        pipe.send(4321)
+
+    # Receive distributed info
+    dist_info = pipe.recv()
+    assert isinstance(dist_info, list)
+    assert all(isinstance(host_info, HostInfo) for host_info in dist_info)
+
+    # Receive port info
+    port = pipe.recv()
+    pipe.send(port)
+
+
+def test_agent_forward_master_port(
+    server: tuple[LaunchArguments, ScriptArguments, MasterService, int],
+):
+    args, _, _, port = server
+    channel = grpc.insecure_channel(f"localhost:{port}")
+    agent0 = Agent(0, args.tag, args.base_dir, OobleckMasterStub(channel))
+    agent1 = Agent(1, args.tag, args.base_dir, OobleckMasterStub(channel))
+
+    with patch(
+        "oobleck.elastic.agent.Worker.worker_main",
+        new=worker_main_forward_master_port,
     ):
-        await agent._register_agent(0)
-        await asyncio.sleep(1)
-        assert self.sample_ip in [
-            connection[0] for connection in daemon._agent_connections
-        ]
-
-    @pytest.mark.asyncio
-    async def test_launch_workers(
-        self,
-        daemon: OobleckMasterDaemon,
-        agent: OobleckAgent,
-        mocker: MockerFixture,
+        agent0.launch_workers()
+    with patch(
+        "oobleck.elastic.agent.Worker.worker_main",
+        new=worker_main_forward_master_port,
     ):
-        mocker.patch("oobleck.elastic.agent.worker_main", new_callable=lambda: 0)
+        agent1.launch_workers()
 
-        args_from_master = await agent._register_agent(0)
-        await agent._launch_workers(args_from_master)
-        assert len(agent._workers) == args_from_master.dist.num_workers
-        for worker in agent._workers:
+    for agent in [agent0, agent1]:
+        for worker in agent.workers:
             worker.process.join()
+            assert worker.pipe.recv() == 4321
 
-    @pytest.mark.asyncio
-    async def test_receive_reconfiguration(
-        self, daemon: OobleckMasterDaemon, agent: OobleckAgent, mocker: MockerFixture
-    ):
-        job_id = 0
 
-        args_from_master = await agent._register_agent(job_id)
-        assert args_from_master == daemon._job_arguments[job_id]
-        agent._args = args_from_master
+@pytest.mark.parametrize("gpu_index", [0, 1, 2, 6])
+def test_worker_main_init_configuration_engine(
+    server: tuple[LaunchArguments, ScriptArguments, MasterService, int],
+    gpu_index: int,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    master_args, script_args, _, _ = server
+    run.agent_list.clear()
 
-        # Fake worker processes
-        pipe = multiprocessing.Pipe()
-        for i in range(args_from_master.dist.num_workers):
-            agent._workers.append(Worker(pipe[1], None))
-        pipe_spy = mocker.spy(agent._workers[0].pipe, "send")
+    pipe, child_pipe = multiprocessing.Pipe()
+    hosts = HostInfo.fetch_hostfile(master_args.hostfile)
+    pipe.send(hosts)
 
-        expected_lost_node = "127.0.0.2"
+    # This creates ConfigurationEngine instance.
+    # Because Fake hostinfo has 2 losts per host,
+    # it must raise IndexError when GPU index >= 2.
 
-        # Create a new agent, register it, and terminate it
-        new_agent = OobleckAgent(
-            agent._args.dist.master_ip, agent._args.dist.master_port, job_id, 1
+    with patch("torch.cuda.device_count", return_value=1):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", str(gpu_index))
+        if gpu_index >= 2:
+            with pytest.raises(IndexError):
+                Worker.worker_main(
+                    child_pipe,
+                    0,
+                    gpu_index,
+                    master_args.tag,
+                    master_args.base_dir,
+                    script_args.training_script,
+                    script_args.training_script_args,
+                )
+            return
+
+        Worker.worker_main(
+            child_pipe,
+            0,
+            1,
+            master_args.tag,
+            master_args.base_dir,
+            script_args.training_script,
+            script_args.training_script_args,
         )
-        await new_agent._connect_to_master(
-            agent._args.dist.master_ip, agent._args.dist.master_port
-        )
-        mocker.patch(
-            "asyncio.StreamWriter.get_extra_info", return_value=("127.0.0.2", "12345")
-        )
-        await new_agent._register_agent(0)
-        new_agent._conn[1].close()
-        await new_agent._conn[1].wait_closed()
 
-        asyncio.create_task(agent.on_receive_response())
-
-        # Yield context so that agent can receive reconfiguration message
-        while "127.0.0.2" in agent._args.dist.node_ips:
-            await asyncio.sleep(0.1)
-
-        pipe_spy.assert_called_with(expected_lost_node)
+    assert ConfigurationEngine._instance is not None
+    instance = ConfigurationEngine.get_instance()
+    assert instance.agent_index == 0
+    assert instance.local_rank == 1
+    assert instance.dist_info == hosts
+    assert instance.rank_map == {
+        HostInfo("127.0.0.1", "0,1", 1234): [0, 1],
+        HostInfo("127.0.0.2", "0,1", 1234): [2, 3],
+        HostInfo("127.0.0.3", "0,1", 1234): [4, 5],
+    }

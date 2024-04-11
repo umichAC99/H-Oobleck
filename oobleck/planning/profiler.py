@@ -1,340 +1,441 @@
-import gc
+import functools
+import importlib
 import json
-import math
-import time
+from dataclasses import asdict, dataclass, field
+from enum import Enum
+from functools import reduce
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
-import torch.fx
-from deepspeed.utils.logging import LoggerFactory
+import torch.nn as nn
+from colossalai.accelerator import get_accelerator
+from colossalai.amp.naive_amp.mixed_precision_optimizer import MixedPrecisionOptimizer
+from colossalai.booster.plugin.hybrid_parallel_plugin import get_param_info
+from colossalai.interface import OptimizerWrapper
+from colossalai.shardformer import ShardConfig, ShardFormer
+from cornstarch.pipeline_template import PipelineTemplate
+from loguru import logger
+from torch.distributed import FileStore
+from transformers import PretrainedConfig, PreTrainedModel
 
-from oobleck.elastic.training_util import OobleckArguments
-from oobleck.execution.dataset import OobleckDataset
-from oobleck.execution.layer import init_tensors
-from oobleck.module.model import OobleckModel
-
-PROFILE_CACHE = "/tmp/oobleck/profiles"
-num_warmup = 2
-num_iteration = 3
-
-logger = LoggerFactory.create_logger("oobleck_profiler")
+from oobleck.engine.configuration_engine import ConfigurationEngine
 
 
-class Profiler:
-    """Oobleck Profiler that profiles execution latency, allreduce latency in node,
-    allreduce latency across node for each layer of the model.
+@dataclass
+class LayerExecutionResult:
+    layer_index: int
+    layer_name: str
+    forward: float
+    backward: float
+    mem_required: int
 
-    To support large model profiling, we offload parameters layer by layer.
+
+class JsonEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, LayerExecutionResult):
+            return asdict(obj)
+        return super().default(obj)
+
+
+class ModelProfiler:
+    """A class for profiling a model.
+
+    Profiling includes:
+    - Forward and backward latency (in ms) for each layer
+    - Maximum memory consumption (in bytes) for each layer
+
+    Args:
+        model (nn.Module): The model to be profiled.
+        layers (list[str]): A list of layer names to be profiled.
+        model must have modules with the given names.
     """
 
     def __init__(
         self,
-        model: OobleckModel,
-        num_workers_per_node: int,
-        world_size: int,
+        tag: str,
+        model_name_or_path: str,
+        optimizer_class: str,
+        config: PretrainedConfig,
+        precision: str,
+        tp_size: int,
+        base_dir: Path,
     ):
-        self.model = model
-        self.num_workers_per_node = num_workers_per_node
-        self.world_size = world_size
+        self.model_name_or_path = model_name_or_path
+        self.optimizer_class = optimizer_class
+        self.precision = precision
+        self.model_config = config
+        self.tp_size = tp_size
+        self.profile_dir = base_dir / tag / "profile"
 
-    def profile_execution_layers(self, batch_size: int) -> list[dict[str, float]]:
-        assert dist.is_initialized()
-        import copy
+    @staticmethod
+    def get_profile_path(
+        profile_dir: Path, tp_size: int, microbatch_size: int, precision: str
+    ) -> Path:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        return profile_dir / f"profile_tp{tp_size}_mb{microbatch_size}_{precision}.json"
 
-        results: list[list[int]] = [
-            [0.0, 0.0, 0.0, 0.0] for _ in range(len(self.model.layers))
-        ]
-        if dist.get_rank() == 0:
-            for i in range(num_warmup + 1):
-                logger.info(f"Profiling layer execution latency: {i} iteration")
-                input = tuple(
-                    [
-                        t.detach().clone().to("cuda")
-                        for t in self.model.sample_inputs.values()
-                    ]
-                )
+    def init_profile(self, inputs: dict[str, torch.Tensor]):
+        """Profile the model with a new child process.
 
-                # Implement a batch
-                if batch_size > 1:
-                    new_input = []
-                    for i in range(len(input)):
-                        repeat = [batch_size] + [1] * (len(input[i].shape) - 1)
-                        new_input.append(input[i].repeat(repeat))
-                    input = tuple(new_input)
+        All processes calls this function, and all workers in the first agent
+        actually profile the model.
+        """
+        assert not dist.is_initialized(), "torch.distributed should not be initialized."
+        configuration_engine = ConfigurationEngine.get_instance()
 
-                for idx, layer in enumerate(self.model.layers):
-                    start_mem = torch.cuda.memory_allocated()
+        if configuration_engine.agent_index != 0:
+            return
 
-                    gpu_layer = copy.deepcopy(layer).to("cuda")
-                    torch.cuda.synchronize()
-                    end_mem = torch.cuda.memory_allocated()
-                    model_mem = end_mem - start_mem
-
-                    start = time.time_ns()
-                    with torch.no_grad():
-                        output = gpu_layer(*input)
-                        torch.cuda.synchronize()
-                    end = time.time_ns()
-
-                    end_mem2 = torch.cuda.memory_allocated()
-                    activation_mem = end_mem2 - end_mem
-
-                    if isinstance(output, tuple):
-                        input = tuple(
-                            [
-                                t.detach().clone() if isinstance(t, torch.Tensor) else t
-                                for t in output
-                            ]
-                        )
-                    elif isinstance(output, torch.Tensor):
-                        input = output.detach().clone()
-
-                    forward = (end - start) / 1_000_000
-
-                    output = None
-                    gpu_layer = None
-                    gc.collect()
-                    torch.cuda.empty_cache()
-
-                    if i < num_warmup:
-                        continue
-
-                    results[idx][0] = forward
-                    results[idx][1] = forward * 3
-                    results[idx][2] = model_mem
-                    results[idx][3] = activation_mem
-
-        dist.barrier()
-
-        # 2d tensor, for each layer, multiple allreduce with different number of nodes
-        results: torch.Tensor = torch.tensor(
-            results, dtype=torch.float32, device="cuda", requires_grad=False
+        microbatch_size = inputs["input_ids"].shape[0]
+        profile_path = ModelProfiler.get_profile_path(
+            self.profile_dir, self.tp_size, microbatch_size, self.precision
         )
-        dist.broadcast(results, 0)
+        if profile_path.exists():
+            logger.debug(f"Profile exists: {profile_path}")
+            return
 
+        context = torch.multiprocessing.get_context("spawn")
+        process = context.Process(
+            target=ModelProfiler._profile_model,
+            kwargs={
+                "model_name_or_path": self.model_name_or_path,
+                "model_config": self.model_config,
+                "optimizer_class": self.optimizer_class,
+                "profile_dir": self.profile_dir,
+                "local_rank": configuration_engine.local_rank,
+                "tp_size": self.tp_size,
+                "precision": self.precision,
+                "inputs": inputs,
+            },
+            daemon=True,
+        )
+        process.start()
+        process.join()
+
+    def load_profile(self, microbatch_size: int) -> list[LayerExecutionResult]:
+        """Load profile data from storage.
+
+        Only rank 0 loads profile data, which is broadcasted to all others.
+        """
+        assert dist.is_initialized(), "torch.distributed is not initialized."
+
+        configuration_engine = ConfigurationEngine.get_instance()
+        device = get_accelerator().get_current_device()
+        size_tensor = torch.empty(1, dtype=torch.int64, device=device)
+        if configuration_engine.rank == 0:
+            profile_path = ModelProfiler.get_profile_path(
+                self.profile_dir, self.tp_size, microbatch_size, self.precision
+            )
+            data = profile_path.read_bytes()
+            data_tensor = torch.tensor(list(data), dtype=torch.uint8, device=device)
+            size_tensor[0] = data_tensor.numel()
+
+        dist.broadcast(size_tensor, src=0)
+
+        if configuration_engine.rank != 0:
+            data_tensor = torch.empty(
+                size_tensor.item(), dtype=torch.uint8, device=device
+            )
+
+        dist.broadcast(data_tensor, src=0)
+        torch.cuda.synchronize()
+
+        data = json.loads(data_tensor.cpu().numpy().tobytes())
         return [
-            {
-                "forward": result[0],
-                "backward": result[1],
-                "mem_required": (result[2], result[3]),
-            }
-            for result in results.tolist()
+            LayerExecutionResult(
+                layer_index=layer["layer_index"],
+                layer_name=layer["layer_name"],
+                forward=layer["forward"],
+                backward=layer["backward"],
+                mem_required=layer["mem_required"],
+            )
+            for layer in data["layers"]
         ]
 
     @staticmethod
-    def profile_allreduce_layer(
-        layer: torch.fx.GraphModule, process_group: dist.ProcessGroup
-    ) -> float:
-        numel = sum([p.numel() for p in layer.parameters()])
-        tensor = torch.zeros(numel, dtype=torch.float32, device="cuda")
+    def get_module_by_name(model: nn.Module, name: str) -> nn.Module:
+        """Get a module by its name."""
+        names = name.split(".")
+        return reduce(getattr, names, model)
 
-        dist.barrier(process_group)
-        start = time.time_ns()
-        dist.all_reduce(tensor, group=process_group)
-        dist.barrier(process_group)
-        end = time.time_ns()
+    @staticmethod
+    def _profile_model(
+        model_name_or_path: str,
+        model_config: PretrainedConfig,
+        optimizer_class: str,
+        profile_dir: Path,
+        local_rank: int,
+        tp_size: int,
+        precision: str,
+        inputs: dict[str, torch.Tensor],
+        warmup: int = 3,
+    ):
+        class EventTiming(Enum):
+            FORWARD_START = 0
+            FORWARD_END = 1
+            BACKWARD_START = 2
+            BACKWARD_END = 3
+            OPTIMIZER_STEP_START = 4
+            OPTIMIZER_STEP_END = 5
 
-        del tensor
-        return (end - start) / 1_000_000
+        @dataclass
+        class ProfileData:
+            module_name: str
+            events: dict[EventTiming, torch.cuda.Event] = field(default_factory=dict)
+            memory: dict[EventTiming, int] = field(default_factory=dict)
 
-    def profile_allreduce_across_nodes(self) -> list[dict[int, float]]:
-        """Profile allreduce latency across nodes,
-        \# nodes = 2, 3, ... N.
-        Actual measurement is done only on global rank 0,
-        later others will receive the result from the rank.
+        store_path = profile_dir / "store"
+        logger.debug(
+            f"Profiler initiating torch.distributed: {store_path} with {tp_size} workers"
+        )
 
-        Returns:
-            list[dict[int, float]]: A list of allreduce latency,
-            where key is the number of nodes and value is the latency,
-            for every layer.
-        """
-        assert dist.is_initialized()
-        logger.info(f"Profile allreduce across {self.world_size} nodes latency")
+        store = FileStore(str(store_path), tp_size)
+        dist.init_process_group(
+            backend="nccl",
+            world_size=tp_size,
+            rank=local_rank,
+            store=store,
+        )
 
-        ranks = list(range(0, dist.get_world_size()))
+        assert dist.get_world_size() == tp_size, "World size mismatch"
+        logger.debug(f"Sharding model with {tp_size} ranks")
 
-        process_groups: list[tuple(bool, dist.ProcessGroup)] = []
-        for i in range(0, len(ranks), self.num_workers_per_node):
-            pg_ranks = ranks[i : i + self.num_workers_per_node]
-            process_groups.append(
-                (dist.get_rank() in pg_ranks, dist.new_group(pg_ranks))
+        module_name, cls = model_name_or_path.rsplit(".", 1)
+        module = importlib.import_module(module_name)
+        model: PreTrainedModel = getattr(module, cls)(model_config).to("cpu")
+        model.gradient_checkpointing_enable()
+
+        layers = PipelineTemplate.get_modules(model)
+        profile_data: dict[str, ProfileData] = {
+            layer_name: ProfileData(
+                module_name=layer_name,
+                events={
+                    timing: torch.cuda.Event(enable_timing=True)
+                    for timing in EventTiming
+                },
+            )
+            for layer_name in layers
+        }
+
+        optim_name, cls = optimizer_class.rsplit(".", 1)
+        module = importlib.import_module(optim_name)
+        optim_cls = getattr(module, cls)
+
+        if tp_size > 1:
+            # FIXME (insujang): copy user shardconfig as well
+            shard_config = ShardConfig(
+                tensor_parallel_process_group=dist.new_group(),
+                pipeline_stage_manager=None,
+                enable_tensor_parallelism=True,
+                enable_flash_attention=False,
+            )
+            shardformer = ShardFormer(shard_config)
+
+            model, _ = shardformer.optimize(model)
+
+        mixed_precision = None
+        if precision == "fp16":
+            mixed_precision = torch.float16
+        elif precision == "bf16":
+            mixed_precision = torch.bfloat16
+        if mixed_precision is not None:
+            model = model.to(dtype=mixed_precision)
+
+        optimizer = optim_cls(model.parameters())
+        optim_param_info = get_param_info(optimizer)
+        if precision in ["fp16", "bf16"]:
+            optimizer = MixedPrecisionOptimizer(optimizer, precision=precision)
+        else:
+            optimizer = OptimizerWrapper(optimizer)
+
+        # Configure hooks for each layer
+        def forward_pre_hook(module_name: str, module: nn.Module, inputs):
+            module.to("cuda")
+            profile_data[module_name].memory[EventTiming.FORWARD_START] = (
+                torch.cuda.memory_allocated()
+            )
+            event = profile_data[module_name].events[EventTiming.FORWARD_START]
+            event.record()
+
+        def forward_hook(module_name: str, module: nn.Module, inputs, outputs):
+            profile_data[module_name].memory[EventTiming.FORWARD_END] = (
+                torch.cuda.memory_allocated()
+            )
+            event = profile_data[module_name].events[EventTiming.FORWARD_END]
+            event.record()
+            module.to("cpu")
+
+        modules_to_offload: list[tuple[str, torch.nn.Module]] = []
+
+        def backward_pre_hook(module_name: str, module: nn.Module, grad_output):
+            module.to("cuda")
+            profile_data[module_name].memory[EventTiming.BACKWARD_START] = (
+                torch.cuda.memory_allocated()
+            )
+            event = profile_data[module_name].events[EventTiming.BACKWARD_START]
+            event.record()
+
+        def backward_hook(module_name, module: nn.Module, grad_input, grad_output):
+            event = profile_data[module_name].events[EventTiming.BACKWARD_END]
+            event.record()
+
+            profile_data[module_name].memory[EventTiming.BACKWARD_END] = profile_data[
+                module_name
+            ].memory[EventTiming.BACKWARD_START] + sum(
+                p.numel() * p.element_size() for p in module.parameters()
             )
 
-        results: list[list[int]] = [
-            [0] * len(process_groups) for _ in range(len(self.model.layers))
-        ]
-        for layer_index, layer in enumerate(self.model.layers):
-            for pg_index, (should_run, pg) in enumerate(process_groups):
-                if should_run:
-                    results[layer_index][pg_index] = Profiler.profile_allreduce_layer(
-                        layer, pg
-                    )
+            for _, m in modules_to_offload:
+                m.to("cpu")
+            modules_to_offload.clear()
+            modules_to_offload.append((module_name, module))
 
-        dist.barrier()
+        # Move inputs to cuda
+        for name in inputs.keys():
+            inputs[name] = inputs[name].to("cuda")
 
-        # 2d tensor, for each layer, multiple allreduce with different number of nodes
-        results: torch.Tensor = torch.tensor(
-            results, dtype=torch.float32, device="cuda", requires_grad=False
-        )
-        dist.broadcast(results, 0)
+        logger.info("Profiler started...")
 
-        return [
-            {len(ranks[:i]) + 1: result[i] for i in range(len(result))}
-            for result in results.tolist()
-        ]
+        for layer_name in layers:
+            module = ModelProfiler.get_module_by_name(model, layer_name)
 
-    def profile_allreduce_in_node(
-        self, num_gpus_per_node: int
-    ) -> list[dict[int, float]]:
-        """Profile allreduce latency between GPUs in node,
-        \# nodes = 1, 2, 4, ....
-        Actual measurement is done only on global rank 0,
-        later others will receive the result from the rank.
-
-        Returns:
-            list[dict[int, float]]: A list of allreduce latency,
-            where key is the number of GPUs and value is the latency,
-            for every layer.
-        """
-        assert dist.is_initialized()
-        logger.info(f"Profile allreduce within a node latency")
-
-        num_gpus_list = [2**i for i in range(int(math.log2(num_gpus_per_node)) + 1)]
-        ranks = list(range(num_gpus_per_node))
-
-        process_groups: list[tuple(bool, dist.ProcessGroup)] = []
-        for i in range(len(num_gpus_list)):
-            pg_ranks = ranks[: num_gpus_list[i]]
-            process_groups.append(
-                (dist.get_rank() in pg_ranks, dist.new_group(pg_ranks))
+            module.register_forward_pre_hook(
+                functools.partial(forward_pre_hook, layer_name)
+            )
+            module.register_forward_hook(functools.partial(forward_hook, layer_name))
+            module.register_full_backward_pre_hook(
+                functools.partial(backward_pre_hook, layer_name)
+            )
+            module.register_full_backward_hook(
+                functools.partial(backward_hook, layer_name)
             )
 
-        results: list[list[int]] = [
-            [0] * len(process_groups) for _ in range(len(self.model.layers))
-        ]
-        for layer_index, layer in enumerate(self.model.layers):
-            for pg_index, (should_run, pg) in enumerate(process_groups):
-                if should_run:
-                    results[layer_index][pg_index] = Profiler.profile_allreduce_layer(
-                        layer, pg
+        with torch.no_grad():
+            for _ in range(warmup):
+                model(**inputs)
+
+        should_continue: bool = True
+
+        while should_continue:
+            for param in model.parameters():
+                param.grad = None
+
+            logger.debug("Iterating until overflow solved...")
+            outputs = model(**inputs)
+            optimizer.backward(outputs.loss)
+            torch.cuda.synchronize()
+
+            modules_to_offload.clear()
+            for param in model.parameters():
+                param.data = param.data.to("cpu")
+                param.grad.data = param.grad.data.to("cpu")
+
+            if (
+                mixed_precision is None
+                or not optimizer.mixed_precision.should_skip_step()
+            ):
+                should_continue = False
+
+                for layer_name in layers:
+                    profile_data[layer_name].memory[
+                        EventTiming.OPTIMIZER_STEP_START
+                    ] = 0
+                    profile_data[layer_name].memory[EventTiming.OPTIMIZER_STEP_END] = 0
+                optimizer.step()
+
+                num_parameters = 0
+                working_to_master_map = (
+                    optimizer.get_working_to_master_map()
+                    if (precision in ["fp16", "bf16"])
+                    else None
+                )
+                for layer_name in layers:
+                    module = ModelProfiler.get_module_by_name(model, layer_name)
+                    for param_name, p in module.named_parameters():
+                        if f"{layer_name}.{param_name}" in model._tied_weights_keys:
+                            continue
+
+                        if precision in ["fp16", "bf16"]:
+                            optim_param_index_id = optim_param_info["id2param"][
+                                num_parameters
+                            ]
+                            master_tensor = working_to_master_map[optim_param_index_id]
+                            states: dict[torch.Tensor, dict] = (
+                                optimizer.optim.state.get(master_tensor)
+                            )
+                        else:
+                            states: dict[torch.Tensor, dict] = (
+                                optimizer.optim.state.get(p)
+                            )
+
+                        if states:
+                            for name, state in states.items():
+                                if isinstance(state, torch.Tensor):
+                                    profile_data[layer_name].memory[
+                                        EventTiming.OPTIMIZER_STEP_END
+                                    ] += state.numel() * state.element_size()
+
+                        num_parameters += 1
+
+            optimizer.zero_grad()
+
+        logger.debug("Profiler finished.")
+
+        rank = dist.get_rank()
+        if rank == 0:
+            microbatch_size = inputs["input_ids"].shape[0]
+            profile_path = ModelProfiler.get_profile_path(
+                profile_dir, tp_size, microbatch_size, precision
+            )
+            logger.debug(f"Writing results to {profile_path}")
+
+            data = {
+                "model_name": model_name_or_path,
+                "microbatch_size": microbatch_size,
+                "tp_size": tp_size,
+                "precision": precision,
+                "layers": [],
+            }
+            for index, (layer_name, layer_profile) in enumerate(profile_data.items()):
+                data["layers"].append(
+                    asdict(
+                        LayerExecutionResult(
+                            layer_index=index,
+                            layer_name=layer_name,
+                            forward=layer_profile.events[
+                                EventTiming.FORWARD_START
+                            ].elapsed_time(
+                                layer_profile.events[EventTiming.FORWARD_END]
+                            ),
+                            backward=layer_profile.events[
+                                EventTiming.BACKWARD_START
+                            ].elapsed_time(
+                                layer_profile.events[EventTiming.BACKWARD_END]
+                            ),
+                            mem_required=(
+                                layer_profile.memory[EventTiming.FORWARD_END]
+                                - layer_profile.memory[EventTiming.FORWARD_START]
+                            )
+                            + (
+                                layer_profile.memory[EventTiming.BACKWARD_END]
+                                - layer_profile.memory[EventTiming.BACKWARD_START]
+                            )
+                            + (
+                                layer_profile.memory[EventTiming.OPTIMIZER_STEP_END]
+                                - layer_profile.memory[EventTiming.OPTIMIZER_STEP_START]
+                            ),
+                        )
                     )
+                )
+
+            with profile_path.open("w") as f:
+                json.dump(data, f, cls=JsonEncoder)
 
         dist.barrier()
+        torch.cuda.synchronize()
 
-        # 2d tensor, for each layer, multiple allreduce with different number of nodes
-        results: torch.Tensor = torch.tensor(
-            results, dtype=torch.float32, device="cuda", requires_grad=False
-        )
-        dist.broadcast(results, 0)
+        dist.destroy_process_group()
 
-        return [
-            {num_gpus_list[i]: result[i] for i in range(len(result))}
-            for result in results.tolist()
-        ]
-
-
-def get_profile_path(model_name: str, model_tag: str) -> Path:
-    return Path(PROFILE_CACHE) / f"{model_name}-{model_tag}"
-
-
-def profile(
-    args: OobleckArguments,
-    master_addr: str,
-    master_port: int,
-    num_workers_per_node: int,
-    world_size: int,
-    rank: int,
-):
-    """Profile the given model and return a list of execution result
-    per layer.
-    ExecutionResult includes forward/backward latency, allreduce in node,
-    and allreduce across nodes.
-
-    Result is stored in cache for future use.
-    Path: /tmp/oobleck/profiles/{model_name}-{tag}/{layers|allreduce_in_node|allreduce_across_nodes}
-    """
-    directory = get_profile_path(args.model.model_name, args.model.model_tag)
-    directory.mkdir(parents=True, exist_ok=True)
-
-    logger.info("Profiling model %s", args.model.model_name)
-
-    dataset = OobleckDataset(
-        args.model.model_name, args.model.dataset_path, args.model.dataset_name
-    )
-    model = OobleckModel(
-        args.model.model_name,
-        dataset.sample,
-        None,
-        args.model.model_tag,
-        args.model.model_args,
-    )
-    device = torch.device("cuda")
-    for layer in model.layers:
-        init_tensors(layer, device)
-
-    profiler = Profiler(model, num_workers_per_node, world_size)
-
-    assert not dist.is_initialized(), "Distributed is already initialized."
-    store = dist.TCPStore(
-        host_name=master_addr,
-        port=master_port,
-        world_size=world_size,
-        is_master=bool(rank == 0),
-        wait_for_workers=False,
-    )
-    dist.init_process_group(
-        backend="nccl", store=store, rank=rank, world_size=world_size
-    )
-
-    path = directory / f"mb{args.job.microbatch_size}.json"
-    logger.info("Profiling model execution latency.")
-    layer_execution_result = profiler.profile_execution_layers(args.job.microbatch_size)
-    # In each node, the first process writes a file.
-    if dist.get_rank() % num_workers_per_node == 0:
-        with path.open(mode="w") as f:
-            json.dump(layer_execution_result, f)
-            f.flush()
-
-    path = directory / "allreduce_across_nodes.json"
-    logger.info("Profiling cross-node allreduce latency.")
-    allreduce_across_nodes = profiler.profile_allreduce_across_nodes()
-    if dist.get_rank() % num_workers_per_node == 0:
-        with path.open(mode="w") as f:
-            json.dump(allreduce_across_nodes, f)
-            f.flush()
-
-    path = directory / "allreduce_in_node.json"
-    logger.info("Profiling in-node allreduce latency.")
-    allreduce_in_node = profiler.profile_allreduce_in_node(num_workers_per_node)
-    if dist.get_rank() % num_workers_per_node == 0:
-        with path.open(mode="w") as f:
-            json.dump(allreduce_in_node, f)
-            f.flush()
-
-    # export configuration
-    path = directory / "model_args.json"
-    if dist.get_rank() % num_workers_per_node == 0:
-        with open(path, "w") as f:
-            json.dump(args.model.model_args, f)
-
-    dist.barrier()
-    dist.destroy_process_group()
-    assert not dist.is_initialized()
-
-
-def validate_model_args(args: OobleckArguments) -> bool:
-    directory = get_profile_path(args.model.model_name, args.model.model_tag)
-    path = directory / "model_args.json"
-
-    if not directory.exists() or not path.exists():
-        return False
-
-    args_same: bool = True
-    with path.open() as f:
-        args_from_file = json.load(f)
-        for k, v in args.model.model_args.items():
-            if k not in args_from_file or args_from_file[k] != v:
-                args_same = False
-                break
-    return args_same
+        if rank == 0:
+            store_path.unlink()
