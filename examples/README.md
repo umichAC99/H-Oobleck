@@ -26,21 +26,19 @@ This mode executes a master daemon, agents in each node, and workers to run trai
 Before running a script, we need to prepare an MPI-style hostfile. A hostfile looks like:
 ```
 <ip_or_hostname1> slots=N port=xx
-<ip_or_hostname2> slots=N port=yy
-<ip_or_hostname3> slots=N port=zz
+<ip_or_hostname2> slots=N devices=0,1 port=yy
+<ip_or_hostname2> slots=N devices=2,3 port=yy
 ```
 that specifies nodes to be used for training. The master daemon accesses each daemon via ssh (`<ip_or_hostname>:<port>`) to run agents and workers, thus **all nodes must be accessible without password from the node where the master daemon will be running**.
 
-`slots` indicates the number of GPUs per agent. All agent must have the same number of slots currently.
+The `slots` field indicates the number of GPUs per agent. All agent must have the same number of slots currently.
 
-> To run multiple agents in a single node, use Docker containers. There are two ways for the master daemon to access containers in remote nodes. Currently it doesn't support to invoke containers.
->
-> 1. Run a ssh daemon in each container with different port and host network namespace (`--net=host`) when creating containers.
-> 2. Run a ssh daemon in each container (port doesn't matter) without dedicated network namespaces, and use port forwarding to map in-container-ssh ports to different ports in the host.
+The `devices` field is optional; if not specified, Oobleck automatically uses the first N devices starting from 0.
+It allows to spawn multiple agents on the same node.
 
 > An executable of `python` should be located in the same path of that in the master node and oobleck should be properly configured in all remote nodes.
 > 
-> A script must be in the same path on all nodes.
+> A script must also be in the same path on all nodes.
 
 Now, **use `oobleck.elastic.run` module.** If you want to run `run_gpt2.py`:
 ```bash
