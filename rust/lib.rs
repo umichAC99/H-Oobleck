@@ -1,6 +1,8 @@
 use crate::pipeline_template_generator::PipelineTemplateGenerator;
+use crate::ditto::ButtomUpDPPipelineRecoverSolver;
 mod execution_result;
 mod pipeline_template_generator;
+mod ditto;
 use env_logger;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -71,10 +73,79 @@ fn create_pipeline_templates(
     })
 }
 
+#[pyfunction]
+fn create_base_hetero_pipeline_template(
+    model_name: String,
+    profile_data: Vec<execution_result::LayerExecutionResult>,
+    num_nodes: u32,
+) -> PyResult<PyObject> {
+    // Create a generator
+    let mut generator = PipelineTemplateGenerator::new(profile_data);
+    generator.divide_and_conquer(num_nodes)?;
+
+    Python::with_gil(|py| {
+        // Import the Python module and class
+        let module = PyModule::import(py, "oobleck.planning.ditto")?;
+        let class = module.getattr("HeteroPipelineTemplate")?;
+
+        // Generate the pipeline template
+        let result = generator.get_pipeline_template(num_nodes).unwrap();
+
+        // Call the Python class constructor to create an instance
+        let py_template = class.call1((
+            model_name.as_str(),
+            result.get_modules_per_stage(&generator.layer_execution_results),
+            result.get_latency_per_stage(),
+            result.get_dummy_device_name_per_stage(),
+            result.latency(),
+            result.stages[result.kstar].latency(),
+            result.mem_required(),
+        ))?;
+
+        Ok(py_template.to_object(py))
+    })
+}
+
+#[pyfunction]
+fn dynamic_programming_recovery(
+    node_folding_factor: Vec<i32>,
+    cluster_spec: Vec<i32>,
+    modules_per_stage: Vec<Vec<String>>,
+    layers: Vec<Vec<execution_result::LayerExecutionResult>>,
+) -> PyResult<PyObject> {
+    println!("Received node_folding_factor: {:?}", node_folding_factor);
+    println!("Received cluster_spec: {:?}", cluster_spec);
+    let mut solver = ButtomUpDPPipelineRecoverSolver::new(node_folding_factor);
+    solver.solve(cluster_spec, modules_per_stage, &layers);
+
+    Python::with_gil(|py| {
+        let module = PyModule::import(py, "oobleck.planning.ditto")?;
+        let class = module.getattr("HeteroPipelineTemplate")?;
+
+        let py_template = class.call1(
+            (
+                "gpt2",
+                vec![vec!["layer1".to_string(), "layer2".to_string()]],
+                vec![1.0, 2.0],
+                vec!["device1".to_string(), "device2".to_string()],
+                3.0,
+                1.0,
+                10,
+            )
+        )?;
+
+        Ok(py_template.to_object(py))
+    })
+
+}
+
+
 #[pymodule]
 fn planner(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = env_logger::try_init();
     m.add_function(wrap_pyfunction!(create_pipeline_templates, m)?)?;
+    m.add_function(wrap_pyfunction!(create_base_hetero_pipeline_template, m)?)?;
+    m.add_function(wrap_pyfunction!(dynamic_programming_recovery, m)?)?;
     Ok(())
 }
 

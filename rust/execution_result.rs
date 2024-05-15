@@ -168,6 +168,20 @@ impl PipelineExecutionResult {
         }
         modules_per_stage
     }
+    pub fn get_latency_per_stage(&self) -> Vec<f64> {
+        let mut latency_per_stage: Vec<f64> = Vec::new();
+        for stage in &self.stages {
+            latency_per_stage.push(stage.latency());
+        }
+        latency_per_stage
+    }
+    pub fn get_dummy_device_name_per_stage(&self) -> Vec<String> {
+        let mut dummy_device_name_per_stage: Vec<String> = Vec::new();
+        for _ in &self.stages {
+            dummy_device_name_per_stage.push("V100".to_string());
+        }
+        dummy_device_name_per_stage
+    }
 }
 
 impl PartialEq for PipelineExecutionResult {

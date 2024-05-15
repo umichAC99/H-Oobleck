@@ -43,7 +43,7 @@ def load_profile_data(
 
 
 def init_profile_data(
-    profile_dir: Path, tp_size: int, microbatch_size: int, precision: str
+    profile_dir: Path, tp_size: int, microbatch_size: int, precision: str, default_cost=1.0
 ):
     data = {
         "model_name": model_name,
@@ -54,8 +54,8 @@ def init_profile_data(
             LayerExecutionResult(
                 layer_index=index,
                 layer_name=layer_name,
-                forward=1.0,
-                backward=1.0,
+                forward=default_cost,
+                backward=default_cost,
                 mem_required=10,
             )
             for index, layer_name in enumerate(modules)
