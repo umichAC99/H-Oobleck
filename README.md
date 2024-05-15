@@ -20,6 +20,27 @@ pip install oobleck
 Oobleck relies on [`cornstarch`](https://github.com/Symbioticlab/cornstarch) for pipeline template and [`Colossal-AI`](https://github.com/hpcaitech/ColossalAI) for training backend.
 Optionally, install [`apex`](https://github.com/nvidia/apex), [`xformers`](https://github.com/facebookresearch/xformers) and [`flash-attn`](https://github.com/Dao-AILab/flash-attention) to boost throughput (follow instructions in each README).
 
+### Build From Source
+1. Pull Pytorch container:
+```
+docker pull pytorch/pytorch
+```
+2. Mount current repo to the container:
+```
+docker run -it --rm --gpus all -v $(pwd):/workspace pytorch/pytorch bash
+```
+3. Install dependencies in the container:
+```
+apt-get install build-essential
+apt-get install curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+4. Build Oobleck:
+```
+bash build.sh
+```
+
 ### Run
 
 Please refer to [this README](./examples/README.md).
