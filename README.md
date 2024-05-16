@@ -33,6 +33,7 @@ docker run -it --rm --gpus all -v $(pwd):/workspace pytorch/pytorch bash
 ```
 apt-get install build-essential
 apt-get install curl
+pip install pytest
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
@@ -40,6 +41,11 @@ source $HOME/.cargo/env
 ```
 bash build.sh
 ```
+5. Run planner test
+```
+pytest tests/test_planner.py -s
+```
+
 
 ### Run
 
