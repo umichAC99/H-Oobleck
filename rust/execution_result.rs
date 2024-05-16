@@ -57,11 +57,13 @@ impl<'source> FromPyObject<'source> for LayerExecutionResult {
     }
 }
 
+#[derive(Debug)]
 pub struct StageExecutionResult {
     pub layers: (u32, u32),
     forward: f64,
     backward: f64,
     mem_required: u64,
+    device_type_idx: u32,
 }
 
 impl StageExecutionResult {
@@ -84,6 +86,30 @@ impl StageExecutionResult {
             forward,
             backward,
             mem_required,
+            device_type_idx: 0,
+        }
+    }
+
+    pub fn new_with_device_type(layers: &[LayerExecutionResult], device_type_idx: u32) -> Self {
+        let mut forward = 0.0;
+        let mut backward = 0.0;
+        let mut mem_required = 0;
+
+        for layer in layers {
+            forward += layer.forward;
+            backward += layer.backward;
+            mem_required += layer.mem_required;
+        }
+
+        StageExecutionResult {
+            layers: (
+                layers[0].layer_index,
+                layers[layers.len() - 1].layer_index + 1,
+            ),
+            forward,
+            backward,
+            mem_required,
+            device_type_idx,
         }
     }
 
@@ -92,7 +118,7 @@ impl StageExecutionResult {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PipelineExecutionResult {
     pub stages: Vec<Arc<StageExecutionResult>>,
     pub t1: f64,
@@ -175,12 +201,12 @@ impl PipelineExecutionResult {
         }
         latency_per_stage
     }
-    pub fn get_dummy_device_name_per_stage(&self) -> Vec<String> {
-        let mut dummy_device_name_per_stage: Vec<String> = Vec::new();
-        for _ in &self.stages {
-            dummy_device_name_per_stage.push("V100".to_string());
+    pub fn get_device_idx_per_stage(&self) -> Vec<u32> {
+        let mut device_idx_per_stage: Vec<u32> = Vec::new();
+        for stage in &self.stages {
+            device_idx_per_stage.push(stage.device_type_idx);
         }
-        dummy_device_name_per_stage
+        device_idx_per_stage
     }
 }
 

@@ -18,7 +18,7 @@ def create_base_hetero_pipeline_template(
 def dynamic_programming_recovery(
     node_folding_factors: list[int],
     hetero_cluster: list[int],
-    modules_per_stage: list[list[str]],
+    virtual_stages: list[list[int]],
     layers: list[list[LayerExecutionResult]],
     
 ) -> HeteroPipelineTemplate: ...

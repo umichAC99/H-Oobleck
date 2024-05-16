@@ -9,7 +9,7 @@ class HeteroPipelineTemplate:
         model_name: str,
         modules_per_stage: list[list[str]],
         latency_per_stage: list[float],
-        device_type_per_stage: list[str],
+        device_type_per_stage: list[int],
         latency: float = 0.0,
         kstar_latency: float = 0.0,
         mem_required: int = 0,
@@ -37,6 +37,17 @@ class HeteroPipelineTemplate:
         return self.pseudo_latency + self.kstar_latency * (
             num_microbatches - 4 * self.num_stages
         )
+    
+    def get_stage_indices(self) -> list[list[int]]:
+        """Return indices of the layers in stages in the pipeline."""
+        start = 0
+        end = 0
+        indices = []
+        for stage in self.modules_per_stage:
+            end += len(stage)
+            indices.append(list([start, end-1]))
+            start = end
+        return indices
 
     @property
     def num_layers(self) -> int:

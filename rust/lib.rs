@@ -96,7 +96,7 @@ fn create_base_hetero_pipeline_template(
             model_name.as_str(),
             result.get_modules_per_stage(&generator.layer_execution_results),
             result.get_latency_per_stage(),
-            result.get_dummy_device_name_per_stage(),
+            result.get_device_idx_per_stage(),
             result.latency(),
             result.stages[result.kstar].latency(),
             result.mem_required(),
@@ -110,13 +110,13 @@ fn create_base_hetero_pipeline_template(
 fn dynamic_programming_recovery(
     node_folding_factor: Vec<i32>,
     cluster_spec: Vec<i32>,
-    modules_per_stage: Vec<Vec<String>>,
+    virtual_stages: Vec<Vec<i32>>,
     layers: Vec<Vec<execution_result::LayerExecutionResult>>,
 ) -> PyResult<PyObject> {
     println!("Received node_folding_factor: {:?}", node_folding_factor);
     println!("Received cluster_spec: {:?}", cluster_spec);
     let mut solver = ButtomUpDPPipelineRecoverSolver::new(node_folding_factor);
-    solver.solve(cluster_spec, modules_per_stage, &layers);
+    let result = solver.solve(cluster_spec, &virtual_stages, &layers).unwrap();
 
     Python::with_gil(|py| {
         let module = PyModule::import(py, "oobleck.planning.ditto")?;
@@ -124,13 +124,13 @@ fn dynamic_programming_recovery(
 
         let py_template = class.call1(
             (
-                "gpt2",
-                vec![vec!["layer1".to_string(), "layer2".to_string()]],
-                vec![1.0, 2.0],
-                vec!["device1".to_string(), "device2".to_string()],
-                3.0,
-                1.0,
-                10,
+            "gpt2",
+            result.get_modules_per_stage(&layers[0]),
+            result.get_latency_per_stage(),
+            result.get_device_idx_per_stage(),
+            result.latency(),
+            result.stages[result.kstar].latency(),
+            result.mem_required(),
             )
         )?;
 

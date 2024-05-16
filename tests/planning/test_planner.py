@@ -106,4 +106,6 @@ def test_create_base_hetero_pipeline_template(profile_data_hetero_device: list[l
     # Ensure that 'template' is an instance of 'HeteroPipelineTemplate'
     assert isinstance(template, HeteroPipelineTemplate)
     
-    planner.dynamic_programming_recovery(node_folding_factors, hetero_cluster_test, template.modules_per_stage, profile_data_hetero_device)
+    template = planner.dynamic_programming_recovery(node_folding_factors, hetero_cluster_test, template.get_stage_indices(), profile_data_hetero_device)
+    print("After recovery:")
+    print(template)
